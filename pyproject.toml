@@ -8,6 +8,7 @@ module-root = ""
 [tool.uv]
 override-dependencies = [
     "tensorflow>=2.15.0",
+    "typeguard>=4.0.0", # compatibility with tensorflow-addons
 ]
 # reinstall-package = ["crossformer"] # ensure package is reinstalled in editable mode
 
@@ -67,6 +68,7 @@ dependencies = [
     "readerwriterlock>=1.0.9",
     "grain-nightly>=0.2.14.dev20251027",
     "tfds-nightly>=4.9.9.dev202510250044",
+    "xclients",
 ]
 
 [dependency-groups]
@@ -79,10 +81,11 @@ dev = [
 ]
 
 [tool.uv.sources]
-webpolicy = { git = "http://github.com/mhyatt000/webpolicy" }
+webpolicy = { git = "https://github.com/mhyatt000/webpolicy" }
 pyroki = { git = "https://github.com/chungmin99/pyroki", rev = "2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" }
 # xgym = { git = "https://github.com/mhyatt000/xgym" }
 dlimp = { git = "https://github.com/kvablack/dlimp.git", rev = "main" }
+xclients = { git = "https://github.com/mhyatt000/xclients" }
 
 [tool.pyright]
 typeCheckingMode = "basic"
