@@ -137,14 +137,14 @@ class ArrayRecordBuilder:
     def __init__(
         self,
         name: str,
-        root: str,
         version: str,
+        root: str = Path("~/.cache/arrayrecords"),
         shard_size: int = 100_000,
-        writer_options: str | None = None,
+        writer_options: str | None = "group_size:1",
         build_meta: dict[str, Any] | None = None,  # things that affect schema
     ):
         self.name = name
-        self.root = Path(root).expanduser()
+        self.root = Path(root).expanduser() / name / version
         Path(self.root).mkdir(parents=True, exist_ok=True)
         self.version = version
         self.shard_size = int(shard_size)
@@ -361,7 +361,13 @@ def build_fn_per_episode(*, episodes=None, fn=None):
     assert episodes or fn
     iter = episodes if episodes else fn()
     for ep_id, ep in enumerate(iter):
-        rec = {"episode_id": ep_id, **stackem(*ep)}
+        print(type(ep))
+        if isinstance(ep, list):
+            rec = {"episode_id": ep_id, **stackem(*ep)}
+        elif isinstance(ep, dict):
+            rec = {"episode_id": ep_id, **ep}
+        else:
+            raise ValueError(f"Unexpected episode type: {type(ep)}")
         yield rec
 
 
