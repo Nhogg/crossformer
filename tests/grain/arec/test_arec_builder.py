@@ -21,10 +21,10 @@ def test_prepare_empty_stream(tmp_path):
     assert meta["name"] == "empty_ds"
     assert meta["version"] == "v0"
 
-    spec_path = Path(tmp_path) / "empty_ds" / "spec.json"
+    spec_path = Path(tmp_path) / "empty_ds" / "v0" / "main" / "spec.json"
     assert not spec_path.exists()
 
-    meta_path = Path(tmp_path) / "empty_ds" / "meta.json"
+    meta_path = Path(tmp_path) / "empty_ds" / "v0" / "main" / "meta.json"
     with meta_path.open("r", encoding="utf-8") as f:
         stored_meta = json.load(f)
     assert stored_meta["num_records"] == 0

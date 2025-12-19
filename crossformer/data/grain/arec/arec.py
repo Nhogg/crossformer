@@ -113,6 +113,7 @@ class ArrayRecordBuilder:
             name="tinystories",
             root="~/.cache/arrds",
             version="v1",  # bump when schema changes
+            branch="main",  # logical branch under the dataset/version
             shard_size=200_000,  # records per shard
             writer_options="group_size:32",  # passed through to ArrayRecordWriter
         )
@@ -138,13 +139,15 @@ class ArrayRecordBuilder:
         self,
         name: str,
         version: str,
+        branch: str = "main",
         root: str = Path("~/.cache/arrayrecords"),
         shard_size: int = 100_000,
         writer_options: str | None = "group_size:1",
         build_meta: dict[str, Any] | None = None,  # things that affect schema
     ):
         self.name = name
-        self.root = Path(root).expanduser() / name / version
+        self.branch = branch
+        self.root = Path(root).expanduser() / name / version / branch
         Path(self.root).mkdir(parents=True, exist_ok=True)
         self.version = version
         self.shard_size = int(shard_size)
@@ -254,6 +257,7 @@ class ArrayRecordBuilder:
         meta = {
             "name": self.name,
             "version": self.version,
+            "branch": self.branch,
             "schema_fingerprint": _schema_fingerprint(self.version, self.build_meta),
             "writer_options": self.writer_options or "",
             "shard_size": self.shard_size,
@@ -280,6 +284,7 @@ class ArrayRecordBuilder:
             self._meta = {
                 "name": self.name,
                 "version": self.version,
+                "branch": self.branch,
                 "num_records": len(self._ds),
             }
 
@@ -298,6 +303,7 @@ class ArrayRecordBuilder:
                 self._meta = {
                     "name": self.name,
                     "version": self.version,
+                    "branch": self.branch,
                     "num_records": len(self._ds),
                 }
         return self._meta

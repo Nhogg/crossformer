@@ -275,7 +275,7 @@ def main(cfg: Config) -> None:
 
     ds = arec.ArrayRecordBuilder(
         name=builder.name,
-        root=str(Path("~/.cache/arrayrecords") / builder.name / cfg.version),
+        root=str(Path("~/.cache/arrayrecords")),
         version=cfg.version,  # bump when schema/layout changes
         shard_size=1,  # records per shard
         writer_options="group_size:1",  # passed directly to ArrayRecordWriter
