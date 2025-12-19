@@ -58,7 +58,6 @@ dependencies = [
     "augmax>=0.4.1",
     "jax-smi>=1.0.4",
     "more-itertools>=10.8.0",
-    # "xgym",
     "torch2jax>=0.1.0",
     "pyroki",
     "jaxlie>=1.5.0",
@@ -69,6 +68,7 @@ dependencies = [
     "grain-nightly>=0.2.14.dev20251027",
     "tfds-nightly>=4.9.9.dev202510250044",
     "xclients",
+    "xgym",
 ]
 
 [dependency-groups]
@@ -83,8 +83,8 @@ dev = [
 [tool.uv.sources]
 webpolicy = { git = "https://github.com/mhyatt000/webpolicy" }
 pyroki = { git = "https://github.com/chungmin99/pyroki", rev = "2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" }
-# xgym = { git = "https://github.com/mhyatt000/xgym" }
 dlimp = { git = "https://github.com/kvablack/dlimp.git", rev = "main" }
+xgym = { git = "https://github.com/mhyatt000/xgym" }
 xclients = { git = "https://github.com/mhyatt000/xclients" }
 
 [tool.pyright]
