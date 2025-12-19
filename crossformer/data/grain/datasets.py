@@ -21,7 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from rich.pretty import pprint
 
-from crossformer.data.grain.arec.arec import unpack_record
+from crossformer.data.arec.arec import unpack_record
 from crossformer.data.grain.util.deco import logbar
 from crossformer.utils.jax_utils import cpu, npstr2jax, str2jax
 

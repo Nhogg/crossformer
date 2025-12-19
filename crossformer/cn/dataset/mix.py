@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # from crossformer.data.oxe.oxe_standardization_transforms import  OXE_STANDARDIZATION_TRANSFORMS
 import logging
@@ -11,6 +11,7 @@ import tyro
 
 from crossformer.cn.base import CN
 from crossformer.cn.dataset.types import Head
+from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS
 from crossformer.data.oxe.oxe_dataset_mixes import DATASET_TO_HEAD, HEAD_TO_DATASET
 
@@ -42,9 +43,25 @@ class TFDS(DataSource):
 
 @dataclass
 class Arec(DataSource):
-    _root: ClassVar[Path] = Path().home() / ".cache/arrayrecords"
-    version: str | None = tyro.MISSING
-    upgrade: bool = False
+    version: str | None = None
+    # upgrade: bool = False
+    branch: str = "main"
+
+    builder: ArrayRecordBuilder = field(init=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.version is None:
+            self.version = self.infer_version()
+        self.builder = ArrayRecordBuilder(
+            name=self.name,
+            version=self.version,
+            branch=self.branch,
+        )
+
+    @property
+    def root(self) -> Path:
+        return self.builder.root
 
     @staticmethod
     def from_name(name: str) -> Arec:
@@ -61,24 +78,23 @@ class Arec(DataSource):
     def infer_version(self) -> str:
         log.info(f"No version specified for dataset {self.name}.")
         log.info(f"Inferring latest version for dataset {self.name}")
-        path = self._root / self.name
+        path = self.root / self.name
         versions = [v.name for v in path.iterdir() if v.is_dir()]
         if not versions:
             raise FileNotFoundError(f"No versions found for dataset {self.name} in {path}")
         return sorted(versions)[-1]
 
     def get_version(self):
+        # TODO infer version at post init
         return self.version if self.version else self.infer_version()
 
     @property
     def loc(self):
-        if self.upgrade:
-            return Path(self.name) / self.get_version()
-        return Path(self.name) / self.get_version() / self.name
+        return Path(self.name) / self.get_version() / self.branch
 
     @property
     def path(self):
-        return self._root / self.loc
+        return self.root / self.loc
 
     def get_shards(self):
         path = self.path
@@ -122,7 +138,7 @@ XGYM = [
 ]
 
 NEW = [
-    Arec(name="my_dataset", head=Head.SINGLE, version="0.5.3", upgrade=True),
+    Arec(name="my_dataset", head=Head.SINGLE, version="0.5.3"),
 ]
 
 # multi source
