@@ -7,7 +7,6 @@ from grain._src.core import transforms
 from grain._src.python.dataset import dataset
 import grain.experimental as ge
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from crossformer.data.grain.utils import traj_len
@@ -109,7 +108,7 @@ class UnpackFlatMap(ge.FlatMapTransform):
         # pprint(iscpu)
         if self.use_np:
             _e = jax.tree.map(np.array, element)
-            return [jax.tree.map(lambda x: jnp.asarray(x[i], device=cpu), _e) for i in range(n)]
+            return [jax.tree.map(lambda x: np.array(x[i]), _e) for i in range(n)]
 
         with jax.default_device(cpu):
             return [jax.tree.map(lambda x: jax.device_put(x[i], cpu), element) for i in range(n)]
