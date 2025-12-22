@@ -60,6 +60,10 @@ class Arec(DataSource):
         )
 
     @property
+    def source(self):
+        return self.builder.source
+
+    @property
     def root(self) -> Path:
         return self.builder.root
 
@@ -92,13 +96,8 @@ class Arec(DataSource):
     def loc(self):
         return Path(self.name) / self.get_version() / self.branch
 
-    @property
-    def path(self):
-        return self.root / self.loc
-
     def get_shards(self):
-        path = self.path
-        shards = sorted(path.glob("*.arrayrecord"))
+        shards = sorted(self.root.glob("*.arrayrecord"))
         if not shards:
             raise FileNotFoundError(f"No ArrayRecord shards found in {path}")
         return shards

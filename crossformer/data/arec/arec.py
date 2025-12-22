@@ -271,6 +271,11 @@ class ArrayRecordBuilder:
         self._ds = None
         self._ensure_reader()
 
+    @property
+    def source(self) -> ArrayRecordDataSource:
+        self._ensure_reader()
+        return self._ds
+
     def _ensure_reader(self) -> None:
         if self._ds is not None:
             return
