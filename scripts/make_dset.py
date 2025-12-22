@@ -18,7 +18,7 @@ from xclients.cli.preprocess import main as preprocess
 from xclients.cli.preprocess import PrepConfig
 
 from crossformer.cn.dataset.mix import Arec
-from crossformer.data.grain.arec.arec import ArrayRecordBuilder, build_fn_per_episode
+from crossformer.data.arec.arec import ArrayRecordBuilder, build_fn_per_episode
 from crossformer.data.grain.datasets import (
     _postprocess_episode,
     drop,
@@ -208,7 +208,12 @@ class BuildMGR:
 
 def to_unified_structure(x: dict) -> dict:
     return {
-        "info": {"id": x["episode_id"]},
+        "info": {
+            "id": {
+                "episode": x["episode_id"],
+                "step": x["step_id"],
+            },
+        },
         "action": x["k3ds"],
         "observation": {
             "image": {
@@ -227,7 +232,6 @@ def main(cfg: BuildMGR):
     # preprocess(cfg)
 
     mix = Arec.from_name(cfg.name)
-    mix.upgrade = True
     shards = mix.get_shards()
     print(shards)
     source = grain.sources.ArrayRecordDataSource(shards)
