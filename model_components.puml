@@ -1,0 +1,119 @@
+@startuml CrossFormer Component Diagram
+!theme plain
+
+package "CrossFormer System" {
+
+    [CrossFormerModel] as API
+
+    package "Core Model" {
+        [CrossFormerModule] as Module
+        [CrossFormerTransformer] as Transformer
+    }
+
+    package "Input Processing" {
+        [ImageTokenizer] as ImgTok
+        [LowdimObsTokenizer] as LowTok
+        [TextProcessor] as TextProc
+        [TokenLearner] as TokLearn
+    }
+
+    package "Vision Backbone" {
+        [ResNet26/FILM] as ResNet
+        [PatchEncoder] as Patch
+        [SmallStem] as Stem
+    }
+
+    package "Attention Mechanism" {
+        [BlockTransformer] as BlockTrans
+        [PrefixGroup] as Prefix
+        [TimestepGroup] as Timestep
+        [AttentionRule] as Rule
+    }
+
+    package "Output Heads" {
+        [L1ActionHead] as L1Head
+        [DiffusionActionHead] as DiffHead
+        [ValueHead] as ValHead
+    }
+
+    package "Data Pipeline" {
+        [OXEDataset] as OXE
+        [TrajectoryTransform] as TrajTrans
+        [GoalRelabeling] as GoalRel
+        [TaskAugmentation] as TaskAug
+        database "RLDS Format" as RLDS
+    }
+
+    package "Infrastructure" {
+        [Orbax Checkpoints] as Orbax
+        [HuggingFace Hub] as HF
+        [Weights & Biases] as WandB
+    }
+}
+
+' Main flow
+API --> Module
+Module --> Transformer
+Module --> L1Head
+Module --> DiffHead
+Module --> ValHead
+
+' Transformer components
+Transformer --> ImgTok
+Transformer --> LowTok
+Transformer --> TextProc
+Transformer --> TokLearn
+Transformer --> BlockTrans
+
+' Vision encoders
+ImgTok --> ResNet
+ImgTok --> Patch
+ResNet --> Stem
+
+' Attention components
+BlockTrans --> Prefix
+BlockTrans --> Timestep
+BlockTrans ..> Rule
+
+' Data pipeline
+OXE --> RLDS
+OXE --> TrajTrans
+OXE --> GoalRel
+OXE --> TaskAug
+API ..> OXE : loads
+
+' Infrastructure
+API ..> Orbax : save/load
+API ..> HF : pretrained
+API ..> WandB : logging
+
+note right of API
+  **Entry Point**
+  - Pretrained: hf://rail-berkeley/crossformer
+  - 130M parameters
+  - Multi-embodiment support
+end note
+
+note right of Transformer
+  **Architecture**
+  - Blockwise-causal attention
+  - Readout tokens for actions
+  - Multi-modal conditioning
+end note
+
+note right of OXE
+  **Training Data**
+  - 900K trajectories
+  - 20 robot embodiments
+  - Single arm, bimanual, nav, quadruped
+end note
+
+note left of BlockTrans
+  **Attention Patterns**
+  - CAUSAL: sequential
+  - NEVER: no attention
+  - CURRENT: within timestep
+  - ALL: full attention
+end note
+
+@enduml

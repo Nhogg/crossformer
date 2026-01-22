@@ -1,0 +1,317 @@
+@startuml CrossFormer Architecture
+!theme plain
+skinparam linetype ortho
+skinparam nodesep 80
+skinparam ranksep 80
+
+' Main Model API
+package "High-Level API" {
+    class CrossFormerModel {
+        + module: CrossFormerModule
+        + text_processor: TextProcessor
+        + dataset_statistics: dict
+        + example_batch: dict
+        --
+        + create_tasks(texts, goals)
+        + sample_actions(observations, tasks, rng)
+        + forward(batch)
+        + load_pretrained(checkpoint_path)
+        + save_pretrained(step)
+        + create_from_config(config)
+    }
+}
+
+' Core Module
+package "Model Module" {
+    class CrossFormerModule {
+        + transformer: CrossFormerTransformer
+        + heads: dict[str, ActionHead]
+        + readout_key: str
+        --
+        + __call__(batch, train)
+        + get_action(embeddings, train)
+        + loss(batch, train)
+    }
+
+    class CrossFormerTransformer {
+        + obs_tokenizers: dict
+        + task_tokenizers: dict
+        + token_learner: TokenLearner
+        + transformer: BlockTransformer
+        + use_token_learner: bool
+        --
+        + __call__(observations, tasks, train)
+        + create_prefix_group(tasks)
+        + create_timestep_groups(obs_tokens)
+    }
+}
+
+' Tokenizers
+package "Tokenizers" {
+    abstract class Tokenizer {
+        {abstract} + __call__(obs, train)
+    }
+
+    class ImageTokenizer {
+        + encoder: VisionEncoder
+        + use_film: bool
+        + film_layer: FiLMLayer
+        --
+        + __call__(images, train, cond)
+        - _encode_images(images, train)
+    }
+
+    class LowdimObsTokenizer {
+        + use_map: bool
+        + map_head: MAPHead
+        --
+        + __call__(obs, train)
+        - _project_to_tokens(obs)
+    }
+
+    class TokenLearner {
+        + num_tokens: int
+        + bottleneck_dim: int
+        --
+        + __call__(inputs, train)
+        - _compute_attention_weights(x)
+    }
+}
+
+' Vision Encoders
+package "Vision Encoders" {
+    abstract class VisionEncoder {
+        {abstract} + __call__(images, train)
+    }
+
+    class ResNet26 {
+        + stages: int
+        + use_film: bool
+        --
+        + __call__(images, train, cond)
+        - _build_stages()
+    }
+
+    class ResNet26FILM {
+        + film_layers: list
+        --
+        + __call__(images, train, cond)
+    }
+
+    class PatchEncoder {
+        + patch_size: int
+        + hidden_size: int
+        --
+        + __call__(images, train)
+        - _patchify(images)
+    }
+
+    class SmallStem {
+        + conv_layers: list
+        --
+        + __call__(images, train)
+    }
+}
+
+' Transformers
+package "Transformer Components" {
+    class BlockTransformer {
+        + num_layers: int
+        + num_heads: int
+        + mlp_dim: int
+        + dropout_rate: float
+        --
+        + __call__(token_groups, train)
+        - _compute_attention_mask(groups)
+        - _apply_causal_mask()
+    }
+
+    class TokenGroup {
+        + tokens: Array
+        + mask: Array
+        + is_causal: bool
+        + attention_rule: AttentionRule
+        --
+        + get_attention_mask()
+    }
+
+    enum AttentionRule {
+        CAUSAL
+        NEVER
+        CURRENT
+        CURRENT_AND_PREVIOUS
+        ALL
+    }
+
+    class PrefixGroup {
+        + tokens: Array
+        + attention_rule: NEVER
+        --
+    }
+
+    class TimestepGroup {
+        + tokens: Array
+        + attention_rule: CAUSAL
+        + timestep: int
+        --
+    }
+}
+
+' Action Heads
+package "Action Heads" {
+    abstract class ActionHead {
+        + action_horizon: int
+        + action_dim: int
+        {abstract} + __call__(embeddings, actions, train)
+        {abstract} + predict_action(embeddings, train)
+    }
+
+    class L1ActionHead {
+        + mlp_layers: list
+        + loss_weight: float
+        --
+        + __call__(embeddings, actions, train)
+        + predict_action(embeddings, train)
+        - _compute_l1_loss(pred, target)
+    }
+
+    class DiffusionActionHead {
+        + diffusion_steps: int
+        + noise_scheduler: Scheduler
+        --
+        + __call__(embeddings, actions, train)
+        + predict_action(embeddings, rng)
+        - _denoise(noisy_actions, embeddings)
+    }
+}
+
+' Other Components
+package "Utilities" {
+    class FiLMLayer {
+        + hidden_dim: int
+        --
+        + __call__(x, conditioning)
+        - _compute_scale_shift(cond)
+    }
+
+    class MAPHead {
+        + num_readouts: int
+        + num_heads: int
+        --
+        + __call__(tokens, train)
+        - _multihead_attention_pooling(x)
+    }
+
+    class TextProcessor {
+        + embedding_dim: int
+        --
+        + embed(texts)
+    }
+}
+
+' Data Pipeline
+package "Data Pipeline" {
+    class OXEDataset {
+        + dataset_mix: str
+        + train: bool
+        + transforms: list
+        --
+        + create_iterator()
+        + get_statistics()
+    }
+
+    class TrajectoryTransform {
+        + window_size: int
+        + action_horizon: int
+        --
+        + __call__(trajectory)
+    }
+
+    class GoalRelabeling {
+        + strategy: str
+        --
+        + __call__(trajectory)
+    }
+
+    class TaskAugmentation {
+        + augment_kwargs: dict
+        --
+        + __call__(trajectory)
+    }
+}
+
+' Relationships - Main API
+CrossFormerModel *-- CrossFormerModule : contains
+CrossFormerModel *-- TextProcessor : uses
+CrossFormerModel ..> OXEDataset : loads data
+
+' Relationships - Module Components
+CrossFormerModule *-- CrossFormerTransformer : contains
+CrossFormerModule *-- ActionHead : contains multiple
+
+' Relationships - Transformer
+CrossFormerTransformer *-- ImageTokenizer : obs_tokenizers
+CrossFormerTransformer *-- LowdimObsTokenizer : obs_tokenizers
+CrossFormerTransformer *-- ImageTokenizer : task_tokenizers
+CrossFormerTransformer *-- TokenLearner : optional
+CrossFormerTransformer *-- BlockTransformer : uses
+
+' Relationships - Tokenizers
+Tokenizer <|-- ImageTokenizer
+Tokenizer <|-- LowdimObsTokenizer
+ImageTokenizer *-- VisionEncoder : encoder
+ImageTokenizer *-- FiLMLayer : optional
+LowdimObsTokenizer *-- MAPHead : optional
+
+' Relationships - Vision Encoders
+VisionEncoder <|-- ResNet26
+VisionEncoder <|-- ResNet26FILM
+VisionEncoder <|-- PatchEncoder
+VisionEncoder <|-- SmallStem
+ResNet26FILM *-- FiLMLayer : multiple
+
+' Relationships - Transformer Components
+BlockTransformer ..> TokenGroup : processes
+TokenGroup <|-- PrefixGroup
+TokenGroup <|-- TimestepGroup
+TokenGroup ..> AttentionRule : uses
+
+' Relationships - Action Heads
+ActionHead <|-- L1ActionHead
+ActionHead <|-- DiffusionActionHead
+
+' Relationships - Data
+OXEDataset ..> TrajectoryTransform : applies
+OXEDataset ..> GoalRelabeling : applies
+OXEDataset ..> TaskAugmentation : applies
+
+' Notes
+note right of CrossFormerModel
+  Entry point for training
+  and inference. Handles
+  checkpoint management
+  and HuggingFace loading.
+end note
+
+note right of CrossFormerTransformer
+  Processes sequences:
+  [task, obs_0, obs_1, ...]
+  with blockwise-causal
+  attention patterns.
+end note
+
+note right of BlockTransformer
+  Implements flexible
+  attention masks for
+  different token groups
+  with custom rules.
+end note
+
+note left of OXEDataset
+  Supports 20+ robot
+  embodiments from
+  Open X-Embodiment
+  dataset collection.
+end note
+
+@enduml

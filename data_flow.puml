@@ -1,0 +1,82 @@
+@startuml CrossFormer Data Flow
+!theme plain
+skinparam sequenceMessageAlign center
+
+actor User
+participant "CrossFormerModel" as Model
+participant "OXEDataset" as Dataset
+participant "CrossFormerModule" as Module
+participant "Tokenizers" as Tokenizer
+participant "BlockTransformer" as Transformer
+participant "ActionHead" as Head
+
+== Data Loading ==
+User -> Dataset: load dataset
+activate Dataset
+Dataset -> Dataset: apply trajectory transforms\n(chunking, goal relabeling)
+Dataset -> Dataset: apply frame transforms\n(augmentation, normalization)
+Dataset --> User: batched data
+deactivate Dataset
+
+== Forward Pass ==
+User -> Model: sample_actions(observations, tasks)
+activate Model
+
+Model -> Model: create_tasks(goals/language)
+Model -> Module: forward(batch)
+activate Module
+
+Module -> Tokenizer: tokenize observations
+activate Tokenizer
+note right
+  - ImageTokenizer: images → tokens
+  - LowdimObsTokenizer: proprio → tokens
+end note
+Tokenizer --> Module: observation tokens
+deactivate Tokenizer
+
+Module -> Tokenizer: tokenize tasks
+activate Tokenizer
+note right
+  - Language → embeddings
+  - Goal images → tokens
+end note
+Tokenizer --> Module: task tokens
+deactivate Tokenizer
+
+Module -> Transformer: process token sequence\n[task, obs_0, obs_1, ...]
+activate Transformer
+Transformer -> Transformer: apply blockwise\ncausal attention
+Transformer --> Module: embeddings
+deactivate Transformer
+
+Module -> Head: predict_action(embeddings)
+activate Head
+Head -> Head: decode action from\nreadout tokens
+Head --> Module: predicted actions
+deactivate Head
+
+Module --> Model: actions + metrics
+deactivate Module
+Model --> User: sampled actions
+deactivate Model
+
+== Training ==
+User -> Model: train_step(batch)
+activate Model
+Model -> Module: loss(batch, train=True)
+activate Module
+
+Module -> Module: forward pass\n(same as above)
+Module -> Head: compute loss\n(predicted vs actual)
+activate Head
+Head --> Module: L1/L2/diffusion loss
+deactivate Head
+
+Module --> Model: total loss + aux losses
+deactivate Module
+Model -> Model: apply gradients
+Model --> User: loss metrics
+deactivate Model
+
+@enduml
