@@ -4,6 +4,12 @@ from typing import Any, Mapping, Sequence, TypeAlias
 
 import jax
 from jax.typing import ArrayLike  # noqa
+from jaxtyping import (  # noqa
+    Array,
+    Float,
+    jaxtyped,
+)
+from typeguard import typechecked  # noqa
 
 PRNGKey: TypeAlias = jax.Array  # keys are just arrays: jax.random.PRNGKey
 PyTree: TypeAlias = jax.typing.ArrayLike | Mapping[str, "PyTree"]
