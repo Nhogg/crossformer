@@ -194,6 +194,15 @@ wheels = [
 ]
 
 [[package]]
+name = "beartype"
+version = "0.22.9"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c7/94/1009e248bbfbab11397abca7193bea6626806be9a327d399810d523a07cb/beartype-0.22.9.tar.gz", hash = "sha256:8f82b54aa723a2848a56008d18875f91c1db02c32ef6a62319a002e3e25a975f", size = 1608866, upload-time = "2025-12-13T06:50:30.72Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl", hash = "sha256:d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2", size = 1333658, upload-time = "2025-12-13T06:50:28.266Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.11.12"
 source = { registry = "https://pypi.org/simple" }
@@ -526,6 +535,7 @@ dependencies = [
     { name = "absl-py" },
     { name = "array-record" },
     { name = "augmax" },
+    { name = "beartype" },
     { name = "chex" },
     { name = "distrax" },
     { name = "dlimp" },
@@ -538,6 +548,7 @@ dependencies = [
     { name = "jax-smi" },
     { name = "jaxlib" },
     { name = "jaxlie" },
+    { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "ml-collections" },
     { name = "ml-dtypes" },
@@ -552,22 +563,22 @@ dependencies = [
     { name = "orbax" },
     { name = "orbax-checkpoint" },
     { name = "plotly" },
+    { name = "pyright" },
     { name = "pyroki" },
     { name = "python-box" },
     { name = "readerwriterlock" },
     { name = "robot-descriptions" },
     { name = "scipy" },
-    { name = "tensorflow" },
     { name = "tensorflow-datasets" },
     { name = "tensorflow-graphics" },
     { name = "tensorflow-hub" },
     { name = "tensorflow-probability" },
-    { name = "tensorflow-text" },
     { name = "tensorstore" },
     { name = "tfds-nightly" },
     { name = "torch2jax" },
     { name = "tqdm" },
     { name = "transformers" },
+    { name = "typeguard" },
     { name = "tyro" },
     { name = "wandb" },
     { name = "webpolicy" },
@@ -589,6 +600,7 @@ requires-dist = [
     { name = "absl-py", specifier = ">=0.12.0" },
     { name = "array-record", specifier = ">=0.8.1" },
     { name = "augmax", specifier = ">=0.4.1" },
+    { name = "beartype", specifier = ">=0.22.9" },
     { name = "chex", specifier = ">=0.1.85" },
     { name = "distrax", specifier = "==0.1.5" },
     { name = "dlimp", git = "https://github.com/kvablack/dlimp.git?rev=main" },
@@ -601,6 +613,7 @@ requires-dist = [
     { name = "jax-smi", specifier = ">=1.0.4" },
     { name = "jaxlib", specifier = "==0.5.3" },
     { name = "jaxlie", specifier = ">=1.5.0" },
+    { name = "jaxtyping", git = "https://github.com/patrick-kidger/jaxtyping" },
     { name = "matplotlib" },
     { name = "ml-collections", specifier = ">=0.1.0" },
     { name = "ml-dtypes", specifier = ">=0.2.0" },
@@ -615,22 +628,22 @@ requires-dist = [
     { name = "orbax", specifier = ">=0.1.9" },
     { name = "orbax-checkpoint", specifier = "==0.11.20" },
     { name = "plotly", specifier = ">=5.16.1" },
+    { name = "pyright", specifier = ">=1.1.408" },
     { name = "pyroki", git = "https://github.com/chungmin99/pyroki?rev=2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" },
     { name = "python-box", specifier = ">=7.3.2" },
     { name = "readerwriterlock", specifier = ">=1.0.9" },
     { name = "robot-descriptions", specifier = ">=1.21.0" },
     { name = "scipy", specifier = ">=1.12.0" },
-    { name = "tensorflow", specifier = ">=2.15.0" },
     { name = "tensorflow-datasets", specifier = "==4.9.2" },
     { name = "tensorflow-graphics", specifier = "==2021.12.3" },
     { name = "tensorflow-hub", specifier = ">=0.14.0" },
     { name = "tensorflow-probability", specifier = "==0.23.0" },
-    { name = "tensorflow-text", specifier = ">=2.13.0" },
     { name = "tensorstore", specifier = ">=0.1.60" },
     { name = "tfds-nightly", specifier = ">=4.9.9.dev202510250044" },
     { name = "torch2jax", specifier = ">=0.1.0" },
     { name = "tqdm" },
     { name = "transformers", specifier = "==4.43.1" },
+    { name = "typeguard", specifier = ">=4.4.4" },
     { name = "tyro", specifier = ">=0.9.1" },
     { name = "wandb", specifier = ">=0.12.14" },
     { name = "webpolicy", git = "https://github.com/mhyatt000/webpolicy" },
@@ -1512,14 +1525,10 @@ dependencies = [
 
 [[package]]
 name = "jaxtyping"
-version = "0.3.4"
-source = { registry = "https://pypi.org/simple" }
+version = "0.3.5"
+source = { git = "https://github.com/patrick-kidger/jaxtyping#9be85233d60c8c08167e24704b2af7b017478e2e" }
 dependencies = [
     { name = "wadler-lindig" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5e/fe/90f8884647073ea77a0fc5ec27e1605288591c89e60e53a6dd1d849ca6fc/jaxtyping-0.3.4.tar.gz", hash = "sha256:b4aac576a1b6c62a363f76f543f21c7cd4c7bb8714816c2c875f28b7abcdb770", size = 45665, upload-time = "2025-12-15T19:26:06.056Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cb/92/f30138ffa65d51791f85ec057eb76ae8eab125ed20f8f337918df3f1c775/jaxtyping-0.3.4-py3-none-any.whl", hash = "sha256:70e438db2f361575d04cccea50f77f9c8fe92f8b2086dc0ce89e5f1658bebaab", size = 56017, upload-time = "2025-12-15T19:26:04.835Z" },
 ]
 
 [[package]]
@@ -3703,6 +3712,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pyright"
+version = "1.1.408"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nodeenv" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/b2/5db700e52554b8f025faa9c3c624c59f1f6c8841ba81ab97641b54322f16/pyright-1.1.408.tar.gz", hash = "sha256:f28f2321f96852fa50b5829ea492f6adb0e6954568d1caa3f3af3a5f555eb684", size = 4400578, upload-time = "2026-01-08T08:07:38.795Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/82/a2c93e32800940d9573fb28c346772a14778b84ba7524e691b324620ab89/pyright-1.1.408-py3-none-any.whl", hash = "sha256:090b32865f4fdb1e0e6cd82bf5618480d48eecd2eb2e70f960982a3d9a4c17c1", size = 6399144, upload-time = "2026-01-08T08:07:37.082Z" },
+]
+
+[[package]]
 name = "pyroki"
 version = "0.0.0"
 source = { git = "https://github.com/chungmin99/pyroki?rev=2272d0ab8bf74026a2c8530b6b6174f3b19dcb97#2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" }
@@ -4679,22 +4701,6 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/90/4e8c686f2e691f48e40e16a539c61a6e9880743733d8c4dc3f275d12268e/tensorflow_probability-0.23.0-py2.py3-none-any.whl", hash = "sha256:dda5cacfe50cb19ecd96f3ce81e6ff8680d84213bcfe94ca0aaf6e5f51c88061", size = 6915575, upload-time = "2023-11-20T23:21:06.624Z" },
-]
-
-[[package]]
-name = "tensorflow-text"
-version = "2.19.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "tensorflow" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/06/35846b973dc979c82f07c260ec07b77fccf0bac48fca60db611ebfb55f87/tensorflow_text-2.19.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:640f50e8e49dfb6438c90c2ae79b816ee4a14dee195d6e87958716a19ad3ccfc", size = 6114735, upload-time = "2025-04-04T20:52:54.275Z" },
-    { url = "https://files.pythonhosted.org/packages/38/6a/21ab907e798573d70afe746ec1a0fcd27241ef8ae3b2e39203625d504f73/tensorflow_text-2.19.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:bf3582d6de40f4198f7b59b872692f159e61c0173bfbceccc691fdf8a476b781", size = 5449585, upload-time = "2025-04-04T20:52:41.573Z" },
-    { url = "https://files.pythonhosted.org/packages/fa/8a/47abf702e3ad891f335ef72598a9a24e43a754c677d8941fc2fbc7df7cd2/tensorflow_text-2.19.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:23468daf9ccc8220317b0457e9a72e199a78894fda269dec68e5188e153887e6", size = 5239760, upload-time = "2025-04-04T20:53:22.555Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/d7/417877fddb215d8a99ae636946f96b19f6e2ceedcd7eb49be985baae3662/tensorflow_text-2.19.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:4e73841fbc06061b0d6f0ef6367e94ec171e4eff2e45938e1d411a27021e0e31", size = 6109258, upload-time = "2025-04-04T20:52:38.556Z" },
-    { url = "https://files.pythonhosted.org/packages/21/23/70683698d751e08cf1ab70d6f31a39034a2a9a494c1ec42d301cba3d8287/tensorflow_text-2.19.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a77839d411aae75eacd60fa9d85453d1a2bcada79fc391d10a6d6aacc82b6088", size = 5447455, upload-time = "2025-04-04T20:52:19.879Z" },
-    { url = "https://files.pythonhosted.org/packages/5a/e2/3efb758e284f2701429e1afc90293494fa3be7eac93fdc96de6378b21831/tensorflow_text-2.19.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fc159c551243cf7926be66c68dd0d480d2f7e0d82b4c7e494cb2bfa20d7617ca", size = 5240926, upload-time = "2025-04-04T20:53:34.924Z" },
 ]
 
 [[package]]

@@ -1,0 +1,16 @@
+[workspace]
+authors = ["Matthew Hyatt <mhyatt000@gmail.com>"]
+channels = ["conda-forge"]
+name = "crossformer"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+nolimit = { cmd = "bash -c ulimit -n 65536" }
+load-mano = { cmd = "uv run scripts/debug/data_grain.py --data.mix sweep_mano", depends-on = ["nolimit"] }
+load-single = { cmd = "uv run scripts/debug/data_grain.py --data.mix xgym_sweep_single" }
+load = { cmd = "uv run scripts/debug/data_grain.py --data.mix xgym_sweep" , depends-on = ["nolimit"] }
+setup = { cmd = "uvx pre-commit install && uvx pre-commit autoupdate" }
+cov = { cmd = "uv run pytest -vv -s --cov --cov-report=term-missing" }
+
+[dependencies]
