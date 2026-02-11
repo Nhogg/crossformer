@@ -3,7 +3,7 @@
 import functools
 import warnings
 
-from crossformer.utils.typing import DeprecatedError
+from crossformer.utils.mytyping import DeprecatedError
 
 
 def get_name(fn):

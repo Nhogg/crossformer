@@ -7,32 +7,19 @@ from typing import Literal, TypeAlias
 import grain
 from grain._src.python.dataset.transformations.flatmap import FlatMapIterDataset
 import jax
-from make_dset import to_unified_structure
 import numpy as np
 from rich import print
 import tyro
 
 from crossformer.cn.dataset.mix import Arec
+from crossformer.cn.dataset.types import Head
 from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.datasets import (
     unpack_record,
 )
 from crossformer.data.grain.map import flatmap
+from crossformer.data.grain.util.mano import add_step_id, tile, to_unified_structure
 from crossformer.utils.spec import spec
-
-
-def tile(x: dict, key: str, shape):
-    if isinstance(shape, str):
-        shape = (len(x[shape]), 1)
-
-    x[key] = np.tile(x[key], shape)
-    return x
-
-
-def write_step(x: dict):
-    n = len(x["episode_id"])
-    x["step_id"] = np.arange(n)
-    return x
 
 
 @dataclass
@@ -41,8 +28,22 @@ class ReformatConfig:
     fmt: Literal["episode", "step"] | None = None  # format
 
 
-StepWise: TypeAlias = grain.MapDataset
-EpWise: TypeAlias = grain.MapDataset
+Step: TypeAlias = dict[str, jax.Array | np.ndarray]
+Episode: TypeAlias = dict[str, jax.Array | np.ndarray]
+
+StepWise: TypeAlias = grain.MapDataset[Step]
+EpWise: TypeAlias = grain.MapDataset[Episode]
+
+
+def identity(x: dict) -> dict:
+    return x
+
+
+shapekeys = {Head.SINGLE: "action.single", Head.K3DS: "k3ds"}
+standards: dict[Any, Callable] = {
+    Head.SINGLE: identity,
+    Head.K3DS: to_unified_structure,
+}
 
 
 def main(cfg: ReformatConfig):
@@ -50,13 +51,20 @@ def main(cfg: ReformatConfig):
         grain.MapDataset.source(cfg.arec.source).seed(42).map(unpack_record)
         # .map(partial(_postprocess_episode, steps=False))
     )
+    shapekey = shapekeys[cfg.arec.head]
 
-    ds = ds.map(partial(tile, key="episode_id", shape="k3ds")).map(write_step).map(to_unified_structure)
+    match cfg.arec.head:
+        case Head.K3DS:
+            ds = ds.map(partial(tile, key="episode_id", shape=shapekey)).map(add_step_id).map(standards[cfg.arec.head])
+        case Head.SINGLE:
+            ds = ds
+    print(spec(ds[0]))
+    quit()
 
     print(spec(ds[0]))
     print(jax.tree.map(lambda x: type(x), ds[0]))
-    ds: StepWise = FlatMapIterDataset(ds, transform=flatmap.UnpackFlatMap(key="action", use_np=True))
 
+    ds: StepWise = FlatMapIterDataset(ds, transform=flatmap.UnpackFlatMap(key="info.id.step", use_np=True))
     dsit = iter(ds)
     first = next(dsit)
 

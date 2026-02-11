@@ -15,8 +15,8 @@ from crossformer.model.components.block_transformer import (
     PrefixGroup,
     TimestepGroup,
 )
+from crossformer.utils.mytyping import Data, Sequence
 from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.typing import Data, Sequence
 
 
 class CrossFormerTransformer(nn.Module):
@@ -126,8 +126,11 @@ class CrossFormerTransformer(nn.Module):
 
         batch_size, horizon = jax.tree_util.tree_leaves(observations)[0].shape[:2]
         assert horizon <= self.max_horizon, f"horizon must be <= max_horizon - {horizon} <= {self.max_horizon}"
-        assert jax.tree_util.tree_all(jax.tree.map(lambda x: x.shape[1] == horizon, observations)), (
-            "observations must have the same horizon"
+
+        is_ok = jax.tree.map(lambda x: x.shape[1] == horizon, observations)
+        assert jax.tree_util.tree_all(is_ok), (
+            "observations must have the same horizon",
+            jax.tree.map(lambda x: x.shape[1], observations),
         )
 
         #

@@ -43,7 +43,7 @@ def make_oxe_dataset_kwargs(
     """
     dataset_kwargs = copy.deepcopy(OXE_DATASET_CONFIGS[name])
 
-    from crossformer.utils.typing import DeprecatedError
+    from crossformer.utils.mytyping import DeprecatedError
 
     raise DeprecatedError("This function is deprecated. Please use the new data loading pipeline.")
 

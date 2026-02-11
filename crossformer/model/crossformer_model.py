@@ -15,6 +15,7 @@ from jax.typing import ArrayLike
 import numpy as np
 from orbax import checkpoint as ocp
 import orbax.checkpoint
+from rich import print
 from rich.pretty import pprint
 import tensorflow as tf
 
@@ -22,8 +23,8 @@ from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.components.action_heads import ActionHead
 from crossformer.model.crossformer_module import CrossFormerModule
+from crossformer.utils.mytyping import Config, Data, Params, PRNGKey, Sequence
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.typing import Config, Data, Params, PRNGKey, Sequence
 
 
 @struct.dataclass
@@ -341,7 +342,9 @@ class CrossFormerModel:
             params = checkpointer.restore(step, params_shape)
         """
 
+        config["text_processor"] = None
         if config["text_processor"] is not None:
+            print(config["text_processor"])
             text_processor = ModuleSpec.instantiate(config["text_processor"])()
         else:
             text_processor = None

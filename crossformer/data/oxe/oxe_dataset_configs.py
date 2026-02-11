@@ -67,7 +67,9 @@ class ActionDim(IntEnum):
     DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
     DMANO_51 = 51  # 3 palm & 48 pose params
     DMANO_52 = 52  #
-    # DMANO_XYZ = 63
+    DMANO_XYZ = 63
+
+    K3DS = 84  # 21 joints x 4 ... xyz+conf?
 
 
 class ProprioDim(IntEnum):
@@ -172,6 +174,7 @@ mano = {
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
     "xgym_lift_mano": mano,
+    "sweep_mano": mano,
     "xgym_stack_mano": mano,
     "xgym_duck_mano": mano,
     "xgym_lift_single": xgym,

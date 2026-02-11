@@ -6,9 +6,9 @@ from typing import Mapping
 
 import jax
 import numpy as np
-import wandb
 
-from crossformer.utils.typing import Any, Data
+from crossformer.utils.mytyping import Any, Data
+import wandb
 
 
 @dataclass

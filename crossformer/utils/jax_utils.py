@@ -11,7 +11,7 @@ from jax.experimental.compilation_cache import compilation_cache
 import jax.numpy as jnp
 import numpy as np
 
-from crossformer.utils.typing import PyTree
+from crossformer.utils.mytyping import PyTree
 
 cpu = jax.devices("cpu")[0]
 

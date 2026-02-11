@@ -28,7 +28,7 @@ from scipy import ndimage
 from crossformer.data.grain.utils import merge
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.utils.jax_utils import cpu, with_device
-from crossformer.utils.typing import PRNGKey
+from crossformer.utils.mytyping import PRNGKey
 
 log = logging.getLogger(__name__)
 
@@ -49,17 +49,17 @@ def add_pad_mask_dict(step: Step, device=cpu) -> Step:
     """Annotates ``step`` with padding masks for observation/task dictionaries."""
 
     # every item says if mask at that time
-    n = step["observation"]["timestep"].shape[0]
+    n = step["observation"]["timestep"].shape
+    n = n[0] if n else 1
 
     def maybe_full(x):
         if x.shape and x.shape[0] == n:
             return x.astype(bool)
-        return jnp.full((n,), x).astype(bool)
+        return np.full((n,), x).astype(bool).reshape(-1)
 
     # is_mask = lambda x: ~ utils.is_padding(x)
-    @with_device(device)
     def is_mask(*args):
-        return jnp.zeros((), dtype=bool, device=device)  # no native strings
+        return np.zeros((), dtype=bool)  # no native strings
 
     pad_masks = jax.tree.map(is_mask, step)
     pad_masks = jax.tree.map(maybe_full, pad_masks)
@@ -74,11 +74,13 @@ def add_head_action_mask(step: Step, name=None) -> Step:
 
     heads = HEAD_TO_DATASET.keys()
     assert HEAD_TO_DATASET and name
-    n = step["observation"]["timestep"].shape[0]
+
+    n = step["observation"]["timestep"].shape
+    n = n[0] if n else 1
+
     masks = {head: (name in d) for head, d in HEAD_TO_DATASET.items()}
-    arr = with_device(cpu)(jnp.array)
-    masks = jax.tree.map(partial(arr, dtype=bool), masks)
-    masks = jax.tree.map(lambda x: jnp.full((n,), x, dtype=bool), masks)
+    masks = jax.tree.map(partial(np.array, dtype=bool), masks)
+    masks = jax.tree.map(lambda x: np.full((n,), x, dtype=bool), masks)
     step["action_head_masks"] = masks
     return step
 
@@ -92,16 +94,16 @@ def pad_actions_and_proprio(
     """Pads actions/proprio streams and records action padding mask."""
 
     actions = traj["action"]
-    traj["action_pad_mask"] = with_device(cpu)(jnp.ones_like)(actions, dtype=bool)
-    pad = with_device(cpu)(jnp.pad)
+    traj["action_pad_mask"] = jax.tree.map(lambda a: np.ones_like(a, dtype=bool), actions)
 
+    raise NotImplementedError("plz transition to padding dict keys not pad array dim")
     if max_action_dim is not None:
         action_dim = actions.shape[-1]
         if action_dim > max_action_dim:
             raise ValueError(f"action_dim ({action_dim}) is greater than max_action_dim ({max_action_dim})")
         pad_width = [(0, 0)] * (actions.ndim - 1) + [(0, max_action_dim - action_dim)]
-        traj["action"] = pad(actions, pad_width, mode="constant")
-        traj["action_pad_mask"] = pad(traj["action_pad_mask"], pad_width, mode="constant", constant_values=False)
+        traj["action"] = np.pad(actions, pad_width, mode="constant")
+        traj["action_pad_mask"] = np.pad(traj["action_pad_mask"], pad_width, mode="constant", constant_values=False)
 
     if max_proprio_dim is not None and "proprio" in traj.get("observation", {}):
         proprio = traj["observation"]["proprio"]
@@ -109,7 +111,7 @@ def pad_actions_and_proprio(
         if proprio_dim > max_proprio_dim:
             raise ValueError(f"proprio_dim ({proprio_dim}) is greater than max_proprio_dim ({max_proprio_dim})")
         pad_width = [(0, 0), (0, max_proprio_dim - proprio_dim)]
-        traj["observation"]["proprio"] = pad(proprio, pad_width, mode="constant")
+        traj["observation"]["proprio"] = np.pad(proprio, pad_width, mode="constant")
 
     return traj
 

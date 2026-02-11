@@ -8,6 +8,7 @@ from box import Box
 import flax
 import jax
 from jax.experimental import multihost_utils
+import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import ConfigDict
 import optax
@@ -15,10 +16,8 @@ from rich.pretty import pprint
 import tensorflow as tf
 import tqdm
 import tyro
-import wandb
 
 from crossformer import cn
-from crossformer.data.grain import pipelines
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
@@ -36,6 +35,7 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
+import wandb
 
 # from absl import logging
 log = logging.getLogger(__name__)
@@ -143,17 +143,21 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     #
 
     if cfg.data.loader.use_grain:
-        _ds, dataset_config, tfconfig = pipelines.make_data_source(cfg)
-        dataset: pipelines.GrainDataset = pipelines.make_single_dataset(
-            dataset_config,
-            train=True,
-            tfconfig=tfconfig,
-            shuffle_buffer_size=1,
-            seed=cfg.seed,
-            shard_fn=shard,
-        )
-        dsit = iter(dataset.dataset)
-        dsit = map(shard, dsit)
+        from crossformer.data.grain.loader import GrainDataFactory
+
+        dataset = GrainDataFactory().make(cfg, shard_fn=shard, train=True)
+
+        # _ds, dataset_config, tfconfig = pipelines.make_data_source(cfg)
+        # dataset: pipelines.GrainDataset = pipelines.make_single_dataset(
+        # dataset_config,
+        # train=True,
+        # tfconfig=tfconfig,
+        # shuffle_buffer_size=1,
+        # seed=cfg.seed,
+        # shard_fn=shard,
+        # )
+        dsit = iter(dataset.dataset)  # already been sharded
+        # dsit = map(shard, dsit)
     else:
         dataset = cfg.data.create(OXE_STANDARDIZATION_TRANSFORMS, train=True)
         dsit = dataset.iterator(prefetch=cfg.data.loader.prefetch)
@@ -246,15 +250,20 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
+            print(head)
             if head_name == "single_arm":
                 head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
             else:
                 head_loss, head_metrics = head.loss(
                     transformer_embeddings,  # action head knows to pull out the "action" readout_key
-                    batch["action"],
+                    batch["action"][head_name],
                     batch["observation"]["timestep_pad_mask"],
-                    batch["action_pad_mask"],
-                    action_head_mask=batch["action_head_masks"][head_name],
+                    action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
+                    action_head_mask=batch["embodiment"][head_name],
+                    # batch["action_pad_mask"],
+                    # action_head_mask=batch["action_head_masks"][head_name],
+                    # action padding will not be used since its only one key per head now.
+                    # action head mask is embodiment mask 1,0 if head is on
                     train=train,
                 )
 
@@ -367,6 +376,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         with timer("dataset"):
             batch = next(dsit)
+            quit()
 
         with timer("train"):
             train_state, update_info = train_step(train_state, batch)

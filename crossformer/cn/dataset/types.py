@@ -25,7 +25,9 @@ class ActionSpace(Enum):
     DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
     DMANO_51 = 51  # 3 palm & 48 pose params
     DMANO_52 = 52  #
+
     MANO = 63  # 21 joints x 3
+    K3DS = 84  # 21 joints x 4 ... xyz+conf?
 
 
 class ActionRep(Enum):
@@ -44,14 +46,17 @@ class Head(Enum):
     SINGLE = "single"
     SINGLE_ARM = "single"  # remap. first definition overrides
     MANO = "mano"
+    K3DS = "k3ds"
 
     MULTI = "multi"  # reserved for MultiDataSource
 
 
-HEAD2SPACE = {
+HEAD2SPACE = {  # convert head name to action space int
     Head.BIMANUAL: ActionSpace.BI_POS_EULER,
     Head.QUADRUPED: ActionSpace.QUADRUPED,
     Head.NAV: ActionSpace.NAV,
     Head.SINGLE: ActionSpace.JOINT,
     Head.MANO: ActionSpace.MANO,
+    Head.MANO: ActionSpace.MANO,
+    Head.K3DS: ActionSpace.K3DS,
 }

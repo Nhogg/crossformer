@@ -25,8 +25,11 @@ class DataSource(CN):
     name: str = tyro.MISSING
     head: Head = tyro.MISSING
 
-    def __post_init__(self):
+    def _register(self):
         self.REGISTRY[self.name] = self
+
+    def __post_init__(self):
+        self._register()
         members = {dataset for datasets in HEAD_TO_DATASET.values() for dataset in datasets}
         assert self.name in members, f"{self.name} missing from HEAD_TO_DATASET"
         assert self.name in OXE_DATASET_CONFIGS, f"{self.name} missing OXE config"
@@ -48,6 +51,7 @@ class Arec(DataSource):
     branch: str = "main"
 
     builder: ArrayRecordBuilder = field(init=False)
+    _cache: Path = field(init=False, default=Path("~/.cache/arrayrecords").expanduser().resolve())
 
     def __post_init__(self):
         super().__post_init__()
@@ -69,12 +73,13 @@ class Arec(DataSource):
 
     @staticmethod
     def from_name(name: str) -> Arec:
-        config = OXE_DATASET_CONFIGS.get(name)
+        config = DataSource.REGISTRY.get(name)
         if config is None:
             raise ValueError(f"No OXE dataset config found for name: {name}")
-        version = config.get("version")
+        version = getattr(config, "version", None)
+        branch = getattr(config, "branch", "main")
         head = DATASET_TO_HEAD.get(name)
-        return Arec(name=name, version=version, head=head)
+        return Arec(name=name, version=version, head=head, branch=branch)
 
     def create(self):
         pass
@@ -82,7 +87,7 @@ class Arec(DataSource):
     def infer_version(self) -> str:
         log.info(f"No version specified for dataset {self.name}.")
         log.info(f"Inferring latest version for dataset {self.name}")
-        path = self.root / self.name
+        path = self._cache / self.name  # no root yet
         versions = [v.name for v in path.iterdir() if v.is_dir()]
         if not versions:
             raise FileNotFoundError(f"No versions found for dataset {self.name} in {path}")
@@ -117,6 +122,7 @@ class MultiDataSource(DataSource):
     head: str = Head.MULTI
 
     def __post_init__(self):
+        self._register()  # no need to assert multidataset
         msg = "Datasets and weights must be same length."
         assert len(self.data) == len(self.weights), msg
 
@@ -129,15 +135,20 @@ class MultiDataSource(DataSource):
         return out
 
 
+##### ##### ##### #####
+# defined sources
+##### ##### ##### #####
+
 XGYM = [
     TFDS(name="xgym_duck_single", head=Head.SINGLE),
     TFDS(name="xgym_lift_single", head=Head.SINGLE),
     TFDS(name="xgym_stack_single", head=Head.SINGLE),
-    TFDS(name="xgym_sweep_single", head=Head.SINGLE),
 ]
 
 NEW = [
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, version="0.5.0", branch="to_step"),
     Arec(name="my_dataset", head=Head.SINGLE, version="0.5.3"),
+    Arec(name="sweep_mano", head=Head.MANO, version="0.0.2", branch="to_step"),
 ]
 
 # multi source
@@ -145,4 +156,11 @@ MultiDataSource(
     name="xgym",
     data=XGYM,
     weights=[1.0] * len(XGYM),
+)
+
+sweep = [DataSource.REGISTRY["xgym_sweep_single"], DataSource.REGISTRY["sweep_mano"]]
+MultiDataSource(
+    name="xgym_sweep",
+    data=sweep,
+    weights=[1.0] * len(sweep),
 )

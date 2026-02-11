@@ -50,13 +50,17 @@ class Stacked:
         return type(f"Stacked[{dim!r}]", (_StackedDim,), {"dim": dim})
 
 
+class ShapeError(ValueError):
+    """Raised when array shapes do not match expectations."""
+
+
 # shape anno
 Batched = Stacked["batch"]
 Windowed = Stacked["win"]
 Chunked = Stacked["chunk"]
 
 # basic types
-Image: TypeAlias = jt.Float[jt.Array, "H W C"]
+Image: TypeAlias = jt.Float[jt.Array, "H W C=3"]
 Proprio: TypeAlias = jt.Float[jt.Array, "prop"]
 Observation: TypeAlias = Image | Proprio
 
@@ -78,6 +82,8 @@ class SomeClass:
 from dataclasses import fields
 from typing import Iterator
 
+# total=False makes extra keys allowed
+
 
 @dataclass
 class DataMap(Mapping[str, Any]):
@@ -93,7 +99,7 @@ class DataMap(Mapping[str, Any]):
 
 
 @dataclass
-class Step(DataMap):  # total=False makes extra keys allowed
+class Step(DataMap):
     observation: jt.PyTree[Windowed[Observation]]
     action: jt.PyTree[Windowed[Chunked[Action]]]
 
@@ -107,6 +113,7 @@ class Step(DataMap):  # total=False makes extra keys allowed
         raise NotImplementedError("not working yet")
         # TODO /oc
         # we cannot validate the keys
+        # jaxtyping GH#84
 
 
 @dataclass

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 HEAD_TO_DATASET = {
     "mano": [
+        "sweep_mano",
         "rlds_oakink",
         "xgym_lift_mano",
         "xgym_stack_mano",

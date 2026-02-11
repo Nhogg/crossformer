@@ -21,7 +21,7 @@ import tensorflow as tf
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils import jax_utils
-from crossformer.utils.typing import Config, Data, Params, PRNGKey
+from crossformer.utils.mytyping import Config, Data, Params, PRNGKey
 
 
 @struct.dataclass

@@ -25,6 +25,7 @@ from crossformer.data.grain.datasets import (
     unpack_record,
 )
 from crossformer.data.grain.map import flatmap
+from crossformer.data.grain.util.mano import to_unified_structure
 from crossformer.utils.spec import spec
 
 
@@ -204,25 +205,6 @@ class BuildMGR:
         print(self.builder.root)
 
         self.builder.prepare(fn)
-
-
-def to_unified_structure(x: dict) -> dict:
-    return {
-        "info": {
-            "id": {
-                "episode": x["episode_id"],
-                "step": x["step_id"],
-            },
-        },
-        "action": x["k3ds"],
-        "observation": {
-            "image": {
-                "low": x["low"],
-                "over": x["over"],
-                "side": x["side"],
-            }
-        },
-    }
 
 
 def main(cfg: BuildMGR):

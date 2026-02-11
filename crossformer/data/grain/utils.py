@@ -18,26 +18,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import flax.traverse_util as ftu
 import numpy as np
 
 from crossformer.utils.deco import deprecate
+from crossformer.utils.tree import flat
 
 Tree = Mapping[str, Any] | dict[str, Any]
-
-
-def flat(tree):
-    return {".".join(k): v for k, v in ftu.flatten_dict(tree).items()}
-
-
-def unflat(tree):
-    return ftu.unflatten_dict({tuple(k.split(".")): v for k, v in tree.items()})
-
-
-def merge(lhs, rhs):
-    lhs, rhs = flat(lhs), flat(rhs)
-    out = lhs | rhs
-    return unflat(out)
 
 
 @deprecate("use info.length", strict=True)

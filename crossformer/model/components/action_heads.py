@@ -18,7 +18,7 @@ from crossformer.model.components.diffusion import (
     create_diffusion_model,
 )
 from crossformer.model.components.transformer import MAPHead
-from crossformer.utils.typing import PRNGKey
+from crossformer.utils.mytyping import PRNGKey
 
 from .adj.cart import get_fwd_kin_fn, get_jac_fn
 
@@ -502,6 +502,8 @@ class FlowMatchingActionHead(ContinuousActionHead):
             "Expected token_group.tokens to have shape (batch_size, window_size, num_tokens, embedding_size), "
             f"but got shape {token_group.tokens.shape}"
         )
+        print(transformer_outputs.keys())
+        print("token_group.tokens", token_group.tokens.shape)
 
         if self.pool_strategy == "use_map":
             return self.map_head(token_group, train=train)[:, :, 0]
@@ -515,24 +517,26 @@ class FlowMatchingActionHead(ContinuousActionHead):
         self,
         transformer_outputs: dict[str, TokenGroup],
         time: ArrayLike | None = None,
-        current: ArrayLike | None = None,
+        a_t: ArrayLike | None = None,
         train: bool = True,
     ) -> jax.Array:
         embeddings = self._embed(transformer_outputs, train=train)
+        print("embeddings", embeddings.shape)
+        print("\n" * 10)
 
-        if (time is None or current is None) and not self.is_initializing():
+        if (time is None or a_t is None) and not self.is_initializing():
             raise ValueError("Must provide time and current action when calling flow head")
         if self.is_initializing():
             time = jnp.zeros((*embeddings.shape[:2], 1), dtype=jnp.float32)
-            current = jnp.zeros(
+            a_t = jnp.zeros(
                 (*embeddings.shape[:2], self.action_dim * self.action_horizon),
                 dtype=jnp.float32,
             )
 
-        if current.ndim == 4:
-            current = rearrange(current, "b w h a -> b w (h a)")
+        if a_t.ndim == 4:
+            a_t = rearrange(a_t, "b w h a -> b w (h a)")
 
-        return self.flow_model(embeddings, current, time, train=train)
+        return self.flow_model(embeddings, a_t, time, train=train)
 
     def flow_loss(
         self,
@@ -564,7 +568,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
         pred = self(
             transformer_outputs,
             time=time,
-            current=blended,
+            a_t=blended,
             train=train,
         )
 
@@ -597,7 +601,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
             rng, key = jax.random.split(rng)
             tokens = transformer_outputs[self.readout_key].tokens
             batch_size, window_size = tokens.shape[:2]
-            current = self.base_std * jax.random.normal(
+            a_t = self.base_std * jax.random.normal(
                 key,
                 (
                     batch_size,
@@ -608,26 +612,26 @@ class FlowMatchingActionHead(ContinuousActionHead):
 
             dt = 1.0 / max(self.flow_steps, 1)
 
-            def scan_fn(current, step):
+            def scan_fn(a_t, step):
                 t = (step + 0.5) * dt
-                time = jnp.full((*current.shape[:2], 1), t, dtype=current.dtype)
+                time = jnp.full((*a_t.shape[:2], 1), t, dtype=a_t.dtype)
                 velocity = module.apply(
                     variables,
                     transformer_outputs,
                     time,
-                    current,
+                    a_t,
                     train=train,
                 )
-                updated = current + dt * velocity
+                updated = a_t + dt * velocity
                 if self.clip_pred:
                     updated = jnp.clip(updated, -self.max_action, self.max_action)
                 return updated, ()
 
             steps = jnp.arange(self.flow_steps)
-            current, _ = jax.lax.scan(scan_fn, current, steps)
+            a_t, _ = jax.lax.scan(scan_fn, a_t, steps)
 
             actions = rearrange(
-                current,
+                a_t,
                 "b w (h a) -> b w h a",
                 h=self.action_horizon,
                 a=self.action_dim,
@@ -742,7 +746,7 @@ class AdjFlowHead(FlowMatchingActionHead):
         pred = self(
             transformer_outputs,
             time=time,
-            current=blended,
+            a_t=blended,
             train=train,
         )
 

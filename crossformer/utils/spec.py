@@ -59,6 +59,7 @@ def diff(a: Spec, b: Spec, simple=True):
             sa, da = a[k][0], a[k][1]
             sb, db = b[k][0], b[k][1]
         else:
+            print(a)
             sa, da = a[k].shape, a[k].dtype
             sb, db = b[k].shape, b[k].dtype
         if _norm_shape(sa) != _norm_shape(sb) or _norm_dtype(da) != _norm_dtype(db):
@@ -73,7 +74,7 @@ def ezdiff(a: dict[str, Any], b: dict[str, Any], simple=True):
     a, b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
     from rich.pretty import pprint
 
-    pprint(diff(a, b))
+    pprint(diff(a, b, simple=simple))
 
 
 class ModuleSpec(TypedDict):

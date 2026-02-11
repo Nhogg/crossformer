@@ -61,7 +61,7 @@ class ModuleE(Enum):
 
 @dataclass
 class HeadFactory(CN):
-    horizon: int = 4
+    horizon: int = 20
     module: ModuleE = ModuleE.FLOW
     steps: int = 10  # diffusion/flow steps
 
@@ -102,6 +102,10 @@ class HeadFactory(CN):
 
 
 _SINGLE = "single_arm"
+# updated to single going forward
+# to match data loader and dynamic head selection
+# and to retain readout keys
+_SINGLE = "single"
 
 
 class Size(Enum):
@@ -125,13 +129,43 @@ class ModelFactory(CN):
     proprio: Sequence[str] = default([_SINGLE])
 
     # which heads to create
-    heads: Sequence[str] = default([_SINGLE, "bimanual", "mano"])
-
-    size: Size = Size.DETR
+    heads: Sequence[str] = default(
+        [
+            _SINGLE,
+            "k3ds",
+            # "bimanual",
+            # "mano",
+        ]
+    )
     single: HeadFactory = HeadFactory(name=_SINGLE).field()
     bimanual: HeadFactory = HeadFactory(name="bimanual").field()
     mano: HeadFactory = HeadFactory(name="mano").field()
+    k3ds: HeadFactory = HeadFactory(name="k3ds").field()
+
+    size: Size = Size.DETR
     debug: bool = False  # y/n load model?
+
+    def get_all_heads(self) -> dict[str, HeadFactory]:
+        """get selected heads dynamically by searching dict"""
+
+        # print({i: v for i, v in enumerate(self.asdict().values())})
+        def _make(x):
+            """see if x could be a HeadFactory
+            for some reason they are serialized as dicts sometimes
+            """
+            try:
+                return HeadFactory(**x)
+            except Exception:
+                return False
+
+        heads = {k: _make(v) for k, v in self.asdict().items() if _make(v)}
+        return heads
+
+    def get_selected_heads(self) -> dict[str, HeadFactory]:
+        """get selected heads based on self.heads"""
+        all_heads = self.get_all_heads()
+        heads = {k: v for k, v in all_heads.items() if k in self.heads and v.name in self.heads}
+        return heads
 
     def create(self) -> dict[str, Any]:
         """create the model config"""
@@ -144,7 +178,7 @@ class ModelFactory(CN):
         prop = {k: self.make_obs_proprio(k) for k in self.proprio}
         tok = im | prop
 
-        heads = {v.name: v for v in [self.single, self.bimanual, self.mano] if v.name in self.heads}
+        heads = self.get_selected_heads()
         assert len(heads) > 0, "No heads selected"
         model = {
             "observation_tokenizers": tok,
@@ -222,16 +256,14 @@ class ModelFactory(CN):
 
     def max_horizon(self) -> int:
         h = 0
-        for head in [self.single, self.bimanual, self.mano]:
-            if head.name in self.heads:
-                h = max(h, head.horizon)
+        for head in self.get_selected_heads().values():
+            h = max(h, head.horizon)
         return h
 
     def max_action_dim(self) -> int:
         d = 0
-        for head in [self.single, self.bimanual, self.mano]:
-            if head.name in self.heads:
-                d = max(d, head.dim.value)
+        for head in self.get_selected_heads().values():
+            d = max(d, head.dim.value)
         return d
 
 
@@ -258,7 +290,7 @@ class Train(CN):
     eval: Eval = Eval().field()
     rollout: Rollout = Rollout().field()
 
-    log_level: Literal["debug", "info", "warning", "error"] = "info"  # logging verbosity
+    log_level: Literal["debug", "info", "warning", "error"] = "warning"  # logging verbosity
     log_interval: int = 100
     eval_interval: int = 2000
     save_interval: int = 2000
@@ -285,7 +317,7 @@ class Train(CN):
                 f"data.transform.traj ({self.data.transform.traj.max_action_dim}) "
                 f"model.max_action_dim ({self.model.max_action_dim()})."
             )
-            self.data.transform.traj.max_action_dim = self.model.max_action_dim()
+            self.data.transform.traj.max_action_dim = ActionDim(self.model.max_action_dim())
 
         if self.optimizer.lr.decay_steps is None:
             log.warning(f"WARNING: decay_steps is None, setting it to {self.steps}")

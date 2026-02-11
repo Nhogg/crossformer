@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 
 from crossformer.model.components.base import TokenGroup
-from crossformer.utils.typing import Dtype, PRNGKey, Shape
+from crossformer.utils.mytyping import Dtype, PRNGKey, Shape
 
 
 class AddPositionEmbs(nn.Module):

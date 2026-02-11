@@ -12,13 +12,13 @@ import logging
 from typing import Any
 
 import grain.python as gp
-import jax.numpy as jnp
+import jax
 import numpy as np
 
 from crossformer.data.grain import metadata
-from crossformer.utils.jax_utils import cpu, str2jax
+from crossformer.utils.jax_utils import str2jax
+from crossformer.utils.mytyping import DeprecatedError
 from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.typing import DeprecatedError
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ def _resolve_callable(spec_or_fn: ModuleSpec | Callable | None) -> Callable | No
         "kwargs",
     }:
         return ModuleSpec.instantiate(spec_or_fn)  # type: ignore[arg-type]
+
     if not callable(spec_or_fn):
         raise TypeError(f"Expected callable or ModuleSpec, got {type(spec_or_fn)!r}")
     return spec_or_fn  # type: ignore[return-value]
@@ -105,16 +106,13 @@ def _restructure_trajectory(
     # @codex add some action processing fn here.
     # in place of hard coded action definition
 
-    n = len(step["observation"]["proprio"]["joints"])
-    step_id = step.get("step_id", jnp.asarray(np.arange(n), device=cpu))
-    step_id = step_id.reshape(-1)
-    step["observation"]["timestep"] = step_id
-    step["step_id"] = step_id
+    info = step["info"]
+    sid, eid = np.array(info["step"]).reshape(-1), np.array(info["episode"]).reshape(-1)
+    step["info"]["id"] = {"step": sid, "episode": eid}  # patch
+    step["observation"]["timestep"] = sid
 
-    eid = step["episode_id"]
-    step["episode_id"] = jnp.full((n,), eid)
-
-    step["observation"]["proprio"]["single_arm"] = jnp.concatenate(
+    """
+    step["observation"]["proprio"]["single_arm"] = np.concatenate(
         [
             step["observation"]["proprio"]["gripper"],
             step["observation"]["proprio"]["joints"],
@@ -123,9 +121,16 @@ def _restructure_trajectory(
         axis=-1,
     )
 
+
     # concat proprio joints and proprio gripper
     proprio = step["observation"]["proprio"]
-    action = jnp.concatenate([proprio["joints"], proprio["gripper"]], axis=-1)
+    action = {
+            'single': np.concatenate([proprio["joints"], proprio["gripper"]], axis=-1),
+            'position': proprio["position"],
+            }
+    print(spec(step))
+    quit()
+    """
 
     task = {}
     task[config.keys.lang] = step[config.keys.lang]  # simple
@@ -143,12 +148,11 @@ def _restructure_trajectory(
     return {
         "observation": step["observation"],
         "task": task,
-        "action": action,
+        "action": step["action"],  #  action,
         "dataset_name": str2jax(name),
         "info": {
             "dataset_name": str2jax(name),
-            "id": {k: v for k, v in step.items() if "_id" in k},
-            "step_id": step["step_id"],
+            "id": {k.replace("_id", ""): np.array([v]).reshape(-1) for k, v in step.items() if "_id" in k},
         }
         | step.get("info", {}),
     }
@@ -188,6 +192,23 @@ def _restructure_trajectory(
     }
 
 
+def note_embodiment(x: dict):
+    # mark the dataset's embodiments for mask later
+    # for k in action: embodiment[k] = 1
+    x["embodiment"] = {k: np.array(1, dtype=np.bool).reshape(-1) for k in x["action"]}
+    return x
+
+
+def _restructure_step_mano(x: dict, *, name: str, config: GrainDatasetConfig) -> dict:
+    task = {}
+    task[config.keys.lang] = x.pop(config.keys.lang)  # simple
+    x["task"] = task
+
+    x["observation"]["timestep"] = x["info"]["id"]["step"]
+    x = jax.tree.map(lambda y: np.array(y), x)  # ensure numpy arrays
+    return x
+
+
 def _load_dataset_statistics(
     config: GrainDatasetConfig,
     ds: Sequence[dict],
@@ -222,21 +243,24 @@ def build_trajectory_dataset(
 ) -> tuple[gp.MapDataset, metadata.DatasetStatistics]:
     """Builds a :class:`grain.MapDataset` emitting standardized trajectories."""
 
-    source = _resolve_source(config.source)
-    standardize = _resolve_callable(config.standardize_fn)
-    filter_functions = [_resolve_callable(fn) for fn in config.filter_fns if fn]
+    ds = source = _resolve_source(config.source)
 
-    log.info("we are using the new lazy processing pipeline")
-    ds = source
-    for f in filter_functions:
+    filters = [_resolve_callable(fn) for fn in config.filter_fns if fn]
+    for f in filters:
         ds = ds.filter(f)
-    ds = ds.map(partial(_restructure_trajectory, name=config.name, config=config))
+
+    standardize = _resolve_callable(config.standardize_fn)
+
+    r = _restructure_step_mano if "k3ds" in ds[0]["action"] else _restructure_trajectory
+    restructure = ModuleSpec.create(r, name=config.name, config=config)
+    ds = ds.map(ModuleSpec.instantiate(restructure))
+    ds = ds.map(note_embodiment)
 
     stats = _load_dataset_statistics(config, ds)
     # stats = jax.tree.map(jax.device_get, stats)
 
     mask = config.action_normalization_mask
-    norm = metadata.normalize_action_and_proprio
+    norm: Callable = metadata.normalize_action_and_proprio
     norm = partial(
         norm,
         metadata=stats,

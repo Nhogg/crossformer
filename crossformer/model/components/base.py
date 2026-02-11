@@ -4,7 +4,7 @@ import flax
 import jax
 import jax.numpy as jnp
 
-from crossformer.utils.typing import Sequence
+from crossformer.utils.mytyping import Sequence
 
 
 @flax.struct.dataclass

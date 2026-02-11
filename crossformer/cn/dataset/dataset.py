@@ -15,8 +15,6 @@ from crossformer.cn.dataset.transform import Transform
 from crossformer.cn.dataset.transform.frame import FrameTransform
 from crossformer.cn.dataset.transform.traj import TrajectoryTransform
 from crossformer.data.dataset import make_interleaved_dataset
-from crossformer.data.oxe import HEAD_TO_DATASET
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
 
 _ = Transform(name="default")
 
@@ -80,7 +78,7 @@ class Dataset(CN):
     # combination of datasets
     mix: DataSourceE = DataSourceE.xgym_stack_single
     # series of data transforms
-    transform: TransformE = Transform.REGISTRY["default"].field()
+    transform: Transform = Transform.REGISTRY["default"].field()
 
     reader: Reader = Reader().field()
     recompute: bool = False  # recompute data stats? y/n
@@ -93,15 +91,6 @@ class Dataset(CN):
     @property
     def frame(self) -> FrameTransform:
         return self.transform.frame
-
-    def __post__init__(self):
-        # assert self.mix in DataSourceE, f"Mix {self.mix} not registered."
-
-        # ensure that each dataset has a head
-        is_valid = [
-            any(d in dsets for head, dsets in HEAD_TO_DATASET.items()) for d, weight in OXE_NAMED_MIXES[self.mix]
-        ]
-        assert all(is_valid), f"Dataset in mix: {self.mix} doesn't have assigned head."
 
     def get_mix(self):
         return MultiDataSource.REGISTRY[self.mix]
