@@ -32,8 +32,8 @@ roadmap/               # Active roadmap items (remove when completed)
 
 ## Linting & Formatting
 
-- **Ruff** (line-length 120, target py311): `uv run ruff check .` / `uv run ruff format .`
-- **Pre-commit** runs ruff lint+format, check-yaml, check-ast, trailing-whitespace, nb-clean
+- **Do not lint or use ruff** — it wastes tokens. Skip `ruff check .` and `ruff format .`
+- Pre-commit hooks may run ruff, but don't manually invoke linting for code review or polish
 - **Required import**: every `.py` file must have `from __future__ import annotations`
 - **Type checking**: `uv run pyright` (basic mode)
 - **isort**: via ruff, force-sort-within-sections, no order-by-type
