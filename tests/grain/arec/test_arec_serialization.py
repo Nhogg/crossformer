@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from crossformer.data.grain.arec.arec import _schema_fingerprint, pack_record, unpack_record
+from crossformer.data.arec.arec import _schema_fingerprint, pack_record, unpack_record
 
 
 def _assert_nested_equal(left, right):

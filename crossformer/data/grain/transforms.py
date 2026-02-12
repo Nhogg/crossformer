@@ -25,10 +25,10 @@ from jax import numpy as jnp
 import numpy as np
 from scipy import ndimage
 
-from crossformer.data.grain.utils import merge
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.utils.jax_utils import cpu, with_device
 from crossformer.utils.mytyping import PRNGKey
+from crossformer.utils.tree import merge
 
 log = logging.getLogger(__name__)
 

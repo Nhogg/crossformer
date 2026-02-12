@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from crossformer.data.grain.arec.arec import ArrayRecordBuilder
+from crossformer.data.arec.arec import ArrayRecordBuilder
 
 
 def test_prepare_empty_stream(tmp_path):

@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from crossformer.data.grain.arec import arec
-
-ArrayRecordBuilder = arec.ArrayRecordBuilder
-pack_record = arec.pack_record
+from crossformer.data.arec.arec import ArrayRecordBuilder, pack_record
 
 
 class RecordingDataSource:

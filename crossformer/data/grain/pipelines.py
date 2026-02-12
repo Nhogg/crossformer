@@ -35,10 +35,10 @@ from crossformer.data.grain.datasets import (
 )
 from crossformer.data.grain.transforms import batch_fn
 from crossformer.data.grain.util.remap import _remap_lang, rekey
-from crossformer.data.grain.utils import flat, unflat
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import cpu, with_device_context
 from crossformer.utils.spec import ModuleSpec, spec
+from crossformer.utils.tree import flat, unflat
 
 log = logging.getLogger(__name__)
 
