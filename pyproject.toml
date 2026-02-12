@@ -98,6 +98,11 @@ exclude = ["**/build","**/.venv","**/data"]
 [tool.pytest.ini_options]
 addopts = "-q --maxfail=1 --disable-warnings"
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests requiring GPU",
+    "unit: fast isolated tests",
+    "multinode: multi-node tests run via scripts",
+]
 
 [tool.coverage.run]
 source = ["crossformer"]

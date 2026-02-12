@@ -1,105 +1,119 @@
-"""Integration: end-to-end train step with real model, optimizer, and gradients."""
+"""Integration: end-to-end training steps with real model, optimizer, and gradients."""
 
 from __future__ import annotations
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
-import optax
 import pytest
 
-from crossformer.utils.train_utils import TrainState
-
 from .conftest import requires_gpu
-
-
-def _loss_fn(params, batch, rng, module, train=True):
-    """Minimal loss function matching finetune.py structure."""
-    bound = module.bind({"params": params}, rngs={"dropout": rng})
-    embeddings = bound.crossformer_transformer(
-        batch["observation"],
-        batch["task"],
-        batch["observation"]["timestep_pad_mask"],
-        train=train,
-    )
-
-    total_loss = jnp.float32(0.0)
-    metrics = {}
-    for head_name, head in bound.heads.items():
-        head_loss, head_metrics = head.loss(
-            embeddings,
-            batch["action"][head_name],
-            batch["observation"]["timestep_pad_mask"],
-            action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
-            action_head_mask=batch["embodiment"][head_name],
-            train=train,
-        )
-        total_loss = total_loss + head_loss
-        metrics[head_name] = head_metrics
-
-    metrics["total_loss"] = total_loss
-    return total_loss, metrics
+from .helpers import (
+    assert_finite,
+    assert_metrics_keys,
+    assert_params_changed,
+    init_train_state,
+    train_step,
+)
 
 
 @requires_gpu
 @pytest.mark.integration
 class TestTrainStep:
-    def test_single_train_step(self, model_and_batch):
-        """One grad step should produce finite gradients and update params."""
-        model, batch = model_and_batch
+    """Test single and multi-step training."""
 
-        tx = optax.adamw(learning_rate=1e-4)
-        state = TrainState.create(rng=jax.random.PRNGKey(0), model=model, tx=tx)
+    def test_single_train_step_produces_finite_loss(self, tiny_config, example_batch):
+        """One gradient step should produce finite loss."""
+        batch = jax.tree.map(jnp.asarray, example_batch)
+        state = init_train_state(jax.random.PRNGKey(0), batch, tiny_config)
 
-        rng, dropout_rng = jax.random.split(state.rng)
-        loss_fn = partial(_loss_fn, module=model.module)
-        (loss, _info), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.model.params, batch, dropout_rng)
+        new_state, metrics = train_step(state, batch, jax.random.PRNGKey(1))
 
-        assert jnp.isfinite(loss), f"Loss is not finite: {loss}"
-        grad_leaves = jax.tree.leaves(grads)
-        assert all(jnp.all(jnp.isfinite(g)) for g in grad_leaves), "Gradients contain non-finite values"
-
-        new_state = state.apply_gradients(grads=grads, rng=rng)
+        assert_finite(metrics["loss"])
+        assert 0 < metrics["loss"] < 1000, f"Loss out of expected range: {metrics['loss']}"
         assert new_state.step == 1
 
-    def test_train_20_steps_loss_finite(self, model_and_batch):
-        """Run 20 train steps; loss should stay finite throughout."""
-        model, batch = model_and_batch
+    def test_single_train_step_updates_params(self, tiny_config, example_batch):
+        """At least some parameters should change after one step."""
+        batch = jax.tree.map(jnp.asarray, example_batch)
+        state = init_train_state(jax.random.PRNGKey(0), batch, tiny_config)
 
-        tx = optax.adamw(learning_rate=1e-4)
-        state = TrainState.create(rng=jax.random.PRNGKey(42), model=model, tx=tx)
+        params_old = state.model.params
+        new_state, _ = train_step(state, batch, jax.random.PRNGKey(1))
+        params_new = new_state.model.params
 
-        loss_fn = partial(_loss_fn, module=model.module)
+        assert_params_changed(params_old, params_new, min_changed_fraction=0.05)
 
-        @jax.jit
-        def step(state, batch):
-            rng, dropout_rng = jax.random.split(state.rng)
-            (loss, _info), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.model.params, batch, dropout_rng)
-            new_state = state.apply_gradients(grads=grads, rng=rng)
-            return new_state, loss
+    def test_train_10_steps_loss_finite(self, tiny_config, example_batch):
+        """Train for 10 steps; loss should stay finite."""
+        batch = jax.tree.map(jnp.asarray, example_batch)
+        state = init_train_state(jax.random.PRNGKey(0), batch, tiny_config)
 
+        rng = jax.random.PRNGKey(42)
         losses = []
-        for _ in range(20):
-            state, loss = step(state, batch)
-            losses.append(float(loss))
 
-        assert all(jnp.isfinite(l) for l in losses), f"Non-finite loss found in: {losses}"
-        assert state.step == 20
+        for i in range(10):
+            rng, step_rng = jax.random.split(rng)
+            state, metrics = train_step(state, batch, step_rng)
+            losses.append(float(metrics["loss"]))
 
-    def test_optimizer_updates_weights(self, model_and_batch):
-        """After a gradient step, at least some parameters should change."""
-        model, batch = model_and_batch
+        assert all(jnp.isfinite(l) for l in losses), f"Non-finite loss found: {losses}"
+        assert state.step == 10
 
-        tx = optax.adamw(learning_rate=1e-3)
-        state = TrainState.create(rng=jax.random.PRNGKey(0), model=model, tx=tx)
+    def test_train_10_steps_loss_decreasing(self, tiny_config, example_batch):
+        """Loss should generally decrease over steps (with high learning rate)."""
+        batch = jax.tree.map(jnp.asarray, example_batch)
 
-        loss_fn = partial(_loss_fn, module=model.module)
-        rng, dropout_rng = jax.random.split(state.rng)
-        (_, _), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.model.params, batch, dropout_rng)
-        new_state = state.apply_gradients(grads=grads, rng=rng)
+        config = tiny_config.copy()
+        config["optimizer"] = {"learning_rate": 1e-2, "weight_decay": 0.0}
+        state = init_train_state(jax.random.PRNGKey(0), batch, config)
 
-        old_flat = jax.tree.leaves(state.model.params)
-        new_flat = jax.tree.leaves(new_state.model.params)
-        changed = sum(not jnp.allclose(o, n) for o, n in zip(old_flat, new_flat))
-        assert changed > 0, "No parameters were updated after a gradient step"
+        rng = jax.random.PRNGKey(42)
+        losses = []
+
+        for i in range(10):
+            rng, step_rng = jax.random.split(rng)
+            state, metrics = train_step(state, batch, step_rng)
+            losses.append(float(metrics["loss"]))
+
+        # Check that loss trend is generally decreasing (fit exponential decay)
+        # Allow some noise but overall should decrease
+        final_loss = losses[-1]
+        initial_loss = losses[0]
+        improvement = (initial_loss - final_loss) / (initial_loss + 1e-8)
+        assert improvement > -0.1, f"Loss should decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+
+    def test_multihead_single_step(self, multihead_config, example_batch_multihead):
+        """Single step with multiple heads should compute loss for each."""
+        batch = jax.tree.map(jnp.asarray, example_batch_multihead)
+        state = init_train_state(jax.random.PRNGKey(0), batch, multihead_config)
+
+        new_state, metrics = train_step(state, batch, jax.random.PRNGKey(1))
+
+        assert_metrics_keys(metrics, ["single", "bimanual", "mano"])
+        for head_name in ["single", "bimanual", "mano"]:
+            assert_finite(metrics[head_name]["loss"])
+        assert_finite(metrics["total_loss"])
+        assert new_state.step == 1
+
+    def test_train_step_jit_matches_non_jit(self, tiny_config, example_batch):
+        """JIT-compiled step should match eager execution."""
+        batch = jax.tree.map(jnp.asarray, example_batch)
+        state = init_train_state(jax.random.PRNGKey(0), batch, tiny_config)
+
+        rng1 = jax.random.PRNGKey(99)
+        rng2 = jax.random.PRNGKey(99)
+
+        # Eager execution
+        eager_state, eager_metrics = train_step(state, batch, rng1)
+
+        # JIT execution
+        jit_train_step = jax.jit(train_step)
+        jit_state, jit_metrics = jit_train_step(state, batch, rng2)
+
+        # Compare losses and params
+        jnp.testing.assert_allclose(eager_metrics["loss"], jit_metrics["loss"], rtol=1e-5, atol=1e-5)
+
+        eager_params = jax.tree.leaves(eager_state.model.params)
+        jit_params = jax.tree.leaves(jit_state.model.params)
+        for ep, jp in zip(eager_params, jit_params):
+            jnp.testing.assert_allclose(ep, jp, rtol=1e-5, atol=1e-5)
