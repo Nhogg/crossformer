@@ -25,7 +25,7 @@ def atleast_4d(x):
 
 
 def make_robot():
-    return pk.Robot.from_urdf(adj.cart.urdf)
+    return pk.Robot.from_urdf(urdf)
 
 
 def get_jac_fn(robot: pk.Robot, pad_gripper: bool = False):
