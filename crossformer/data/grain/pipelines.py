@@ -747,7 +747,6 @@ def make_single_dataset(
         # blocks mp prefetch so that final jax ops can be main proc
         #
         ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=2)
-
         ds = ds.map(np2jax)  # dont use jax+grain yet... buggy
         ds = ds.map(shard_fn)
         ds = do_frame_transforms(config, tfconfig, ds)
