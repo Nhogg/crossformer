@@ -252,6 +252,9 @@ def patch_occlude(step: dict, rng, prob: float, min_frac: float = 0.05, max_frac
     images = step["observation"]["image"]
 
     def patch_one(a):
+        squeezed = a.ndim == 4
+        if squeezed:
+            a = a[:, None]  # add time dim
         b, t, h, w = a.shape[:4]  # potentially assert dim = 5
         hit = rng.random((b, t)) < prob
         frac = rng.uniform(min_frac, max_frac, size=(b, t))
@@ -265,7 +268,8 @@ def patch_occlude(step: dict, rng, prob: float, min_frac: float = 0.05, max_frac
         y_in = (ys >= y0[..., None]) & (ys < (y0 + ph)[..., None])
         x_in = (xs >= x0[..., None]) & (xs < (x0 + pw)[..., None])
         patch = hit[..., None, None] & y_in[..., None] & x_in[..., None, :]
-        return np.where(patch[..., None], 0, a)
+        out = np.where(patch[..., None], 0, a)
+        return out[:, 0] if squeezed else out
 
     new_images = {v: patch_one(images[v]) for v in images}
     return {**step, "observation": {**step["observation"], "image": new_images}}

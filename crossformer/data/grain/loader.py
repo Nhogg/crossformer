@@ -18,7 +18,7 @@ from rich import print
 
 from crossformer import cn
 from crossformer.cn.dataset.mix import Arec, MultiDataSource
-from crossformer.data.grain import builders
+from crossformer.data.grain import builders, transforms
 from crossformer.data.grain.datasets import (
     MultiArrayRecordSource,
     unpack_record,
@@ -264,6 +264,9 @@ class GrainDataFactory:
     # final image size; controls both mix_precompatibility cv2.resize and augmax.Resize.
     # None disables both stages (image stays at native size, no center_crop).
     resize: int | tuple[int, int] | None = (64, 64)
+    patch_prob: float = 0.0
+    patch_min_frac: float = 0.05
+    patch_max_frac: float = 0.5
 
     def source2ds(self, dconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -384,6 +387,18 @@ class GrainDataFactory:
         # blocks mp prefetch so that final jax ops can be main proc
         #
         ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=2)
+
+        if train and self.patch_prob > 0:
+            ds = ds.random_map(
+                lambda x, rng: transforms.patch_occlude(
+                    x,
+                    rng,
+                    prob=self.patch_prob,
+                    min_frac=self.patch_min_frac,
+                    max_frac=self.patch_max_frac,
+                ),
+                seed=cfg.seed,
+            )
 
         ds = ds.map(np2jax)  # dont use jax+grain yet... buggy
         if shard_fn is not None:
