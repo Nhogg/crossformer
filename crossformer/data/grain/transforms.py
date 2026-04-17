@@ -237,6 +237,24 @@ def zero_out_future_proprio(traj: Trajectory) -> Trajectory:
     return traj
 
 
+# TODO: add primitives for patch_occlude, image_view_drop, image_key_shuffle, proprio_sample_drop
+# TODO: implement (numpy native, leverage existing grain cpu worker pool)
+def patch_occlude():
+    return None
+
+
+def image_view_drop():
+    return None
+
+
+def image_key_shuffle():
+    return None
+
+
+def proprio_sample_drop():
+    return None
+
+
 def _normalize_resize_size(size: int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(size, int):
         if size <= 0:
