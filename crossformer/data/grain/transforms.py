@@ -239,16 +239,36 @@ def zero_out_future_proprio(traj: Trajectory) -> Trajectory:
 
 # TODO: add primitives for patch_occlude, image_view_drop, image_key_shuffle, proprio_sample_drop
 # TODO: implement (numpy native, leverage existing grain cpu worker pool)
-def patch_occlude():
-    return None
+def patch_occlude(step: dict, rng, prob: float, min_frac: float = 0.05, max_frac: float = 0.5) -> dict:
+    """Randomly zero out a rectangular region in each image view.
 
+    For each (sample, timestep, view), with probability `prob` a rectangle of
+    random area (uniform in [min_frac, max_frac] of image area) and aspect
+    ratio (uniform in [0.5, 2.0]) is zeroed. Views are occluded independently.
 
-def image_view_drop():
-    return None
+    Does not modify pad_mask_dict: an occluded image is still "present", just
+    corrupted. Use image_view_drop for whole-view removal.
+    """
+    images = step["observation"]["image"]
 
+    def patch_one(a):
+        b, t, h, w = a.shape[:4]  # potentially assert dim = 5
+        hit = rng.random((b, t)) < prob
+        frac = rng.uniform(min_frac, max_frac, size=(b, t))
+        aspect = rng.uniform(0.5, 2.0, size=(b, t))
+        ph = np.clip(np.sqrt(frac * h * w * aspect), 1, h).astype(int)
+        pw = np.clip(np.sqrt(frac * h * w / aspect), 1, w).astype(int)
+        y0 = rng.integers(0, np.maximum(h - ph, 1))
+        x0 = rng.integers(0, np.maximum(w - pw, 1))
+        ys = np.arange(h)
+        xs = np.arange(w)
+        y_in = (ys >= y0[..., None]) & (ys < (y0 + ph)[..., None])
+        x_in = (xs >= x0[..., None]) & (xs < (x0 + pw)[..., None])
+        patch = hit[..., None, None] & y_in[..., None] & x_in[..., None, :]
+        return np.where(patch[..., None], 0, a)
 
-def image_key_shuffle():
-    return None
+    new_images = {v: patch_one(images[v]) for v in images}
+    return {**step, "observation": {**step["observation"], "image": new_images}}
 
 
 def proprio_sample_drop():
