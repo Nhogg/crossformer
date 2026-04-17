@@ -36,7 +36,6 @@ from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs, XFlowEvalCallbacks, XFlowEvalLoop
 from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.callbacks.save import SaveCallback
-from crossformer.utils.callbacks.synth_viz import SynthVizCallback
 from crossformer.utils.callbacks.val_mse import ValMSEConfig
 from crossformer.utils.callbacks.viz import (
     ChunkVizCallback,
@@ -93,9 +92,11 @@ class Config:
 
     train_loader: Loader = default(Loader(use_grain=True))
     mp: int = 8  # grain multiproc (for data loading)
+    patch_prob: float = 0.0  # prob of occluding each (sample, time, view)
+    patch_min_frac: float = 0.05
+    patch_max_frac: float = 0.5
     eval_frames: int = 64  # eval examples to poll for rast videos
     hist_every: int = 0  # histogram log interval
-    synth_viz_every: int = 0  # synth kp2d viz interval (0 = disabled)
     quit_after_model: bool = False  # stop after model creation for debugging
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
@@ -187,7 +188,9 @@ def main(cfg: Config):
             prefetch=8,
         ),
     )
-    dataset = GrainDataFactory(mp=cfg.mp).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
+    dataset = GrainDataFactory(
+        mp=cfg.mp, patch_prob=cfg.patch_prob, patch_min_frac=cfg.patch_min_frac, patch_max_frac=cfg.patch_max_frac
+    ).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     eval_dataset = GrainDataFactory(
@@ -196,6 +199,9 @@ def main(cfg: Config):
         mask_slot=False,
         shuffle_slot=False,
         imaug=False,
+        patch_prob=cfg.patch_prob,
+        patch_min_frac=cfg.patch_min_frac,
+        patch_max_frac=cfg.patch_max_frac,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
     inferred_image_keys, inferred_proprio_keys = infer_model_keys(example_batch["observation"])
@@ -315,7 +321,6 @@ def main(cfg: Config):
     viz_cb = cfg.viz.create()
     rast_cb = cfg.rast.create()
     val_mse_cb = cfg.val_mse.create(stats=dataset.dataset_statistics, guide_keys=cfg.guide_keys)
-    synth_viz_cb = SynthVizCallback(stats=dataset.dataset_statistics) if cfg.synth_viz_every > 0 else None
     eval_loop = XFlowEvalLoop(
         loader=eval_dataset.dataset,
         obs_keys=obs_keys,
@@ -326,11 +331,9 @@ def main(cfg: Config):
             viz_cb=viz_cb,
             rast_cb=rast_cb,
             val_mse_cb=val_mse_cb,
-            synth_viz_cb=synth_viz_cb,
             wandb_log=cfg.wandb.log,
             hist_every=cfg.hist_every,
             viz_every=cfg.viz.every,
-            synth_viz_every=cfg.synth_viz_every,
             val_every=cfg.val_mse.every,
             eval_frames=cfg.eval_frames,
             use_guidance=cfg.use_guidance,
@@ -369,7 +372,6 @@ def main(cfg: Config):
                     guide_input = None
 
             actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
-
         with timer("train"):
             state, update_info = train_step(
                 state,
@@ -382,6 +384,7 @@ def main(cfg: Config):
                 guide_input=guide_input,
             )
         timer.tock("total")
+        print(jax.tree.map(lambda x: x.shape, batch))
         update_info = jax.device_get(update_info)
         total_loss = float(update_info["loss"])
         losses.append(total_loss)
