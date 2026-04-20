@@ -9,6 +9,7 @@ module-root = ""
 crossformer = ["uv_build"]
 
 [tool.uv]
+no-build-isolation-package = ["nvdiffrast"]
 override-dependencies = [
     # "tensorflow>=2.15.0",
     # "tensorflow<=2.18.0",
