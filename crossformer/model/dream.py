@@ -226,7 +226,7 @@ class DreamHourglass(nn.Module):
 
         heatmaps = HeatmapHead(self.num_keypoints, name="heads_0")(x)
         stages.append(("heatmaps", heatmaps))
-        mask = MaskHead(name="mask_head")(x) if self.decoder == "dpt" else None
+        mask = MaskHead(name="mask_head")(x)
         if mask is not None:
             stages.append(("mask", mask))
         if not self.internalize_spatial_softmax:
