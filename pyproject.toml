@@ -91,6 +91,7 @@ dependencies = [
     "flatbuffers>=25.12.19",
     "tips",
     "scenic",
+    "pillow>=12.2.0",
 ]
 
 [dependency-groups]
