@@ -119,6 +119,10 @@ class Config:
     wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
     verbose: bool = False
 
+    # Aug
+    imaug: bool = True
+    rotate: bool = True
+
     # LOADER
     bs: int = 1
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
@@ -160,6 +164,44 @@ def _checkpoint_state(state: TrainState) -> DreamCheckpointState:
         step=state.step,
         opt_state=state.opt_state,
     )
+
+
+# Drop low cams at load time
+
+
+# Image Augmentations
+
+
+def _rotate_image_np(image: np.ndarray, angle_deg: float, resample: int, fill: int = 0) -> np.ndarray:
+    pass
+
+
+def _rotate_keypoints_np():
+    pass
+
+
+def _augmax_color_chain():
+    pass
+
+
+def _apply_augmax_color():
+    pass
+
+
+def _translate_image_np():
+    pass
+
+
+def _zoom_image_np():
+    pass
+
+
+def _kp_in_bounds():
+    pass
+
+
+def _maybe_apply_grain_imaug():
+    pass
 
 
 def _resize_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
