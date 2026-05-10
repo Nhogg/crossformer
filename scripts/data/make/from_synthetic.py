@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# TODO: to_iter_dataset + multiprocessing workers
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -65,6 +66,7 @@ class RobotVgaLoader:
         self._items: list[tuple[int, Path, Path, Path]] = []
         for jp in jsons:
             ip = jp.with_suffix(".png")
+            mp = jp.with_name(jp.stem + "_mask.png")
             if not ip.exists():
                 continue
             self._items.append((_frame_index(jp.stem), jp, ip, mp))
@@ -73,7 +75,7 @@ class RobotVgaLoader:
         return len(self._items)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        frame_idx, jp, ip = self._items[idx]
+        frame_idx, jp, ip, mp = self._items[idx]
         meta = json.loads(jp.read_text())
         img = np.asarray(Image.open(ip).convert("RGB"))
         mask = np.asarray(Image.open(mp).convert("L"))
@@ -84,12 +86,14 @@ class RobotVgaLoader:
             yield self[i]
 
 
-def standardize(meta: dict[str, Any], img: np.ndarray, *, frame_idx: int, global_idx: int) -> dict[str, Any]:
+def standardize(
+    meta: dict[str, Any], img: np.ndarray, mask: np.ndarray, *, frame_idx: int, global_idx: int
+) -> dict[str, Any]:
     joints = np.asarray([meta["joints"][k] for k in _JOINT_KEYS], dtype=np.float32)
     gripper = np.float32(meta["joints"]["gripper_angle"])
 
     kps = [k for k in meta["keypoints"] if k["name"] in _KEEP_KP]
-    kp2d = np.asarray([k["pixel_xy"] for k in kps], dtype=np.float32)
+    kp2d = np.asarray([k["pixel_xy"] if k["pixel_xy"] is not None else [0.0, 0.0] for k in kps], dtype=np.float32)
     kp3d_world = np.asarray([k["world_xyz"] for k in kps], dtype=np.float32)
     kp3d_camera = np.asarray([k["camera_xyz"] for k in kps], dtype=np.float32)
     kp_visible = np.asarray([k["visible"] for k in kps], dtype=np.bool_)

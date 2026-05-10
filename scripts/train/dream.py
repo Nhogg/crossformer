@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from functools import partial
@@ -122,11 +123,11 @@ class Config:
     verbose: bool = False
 
     # Aug
-    imaug: bool = True
+    imaug: bool = False
     rotate: bool = True
     real_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
     real_prob: float = 0.3
-    min_visible_kp: int = 5
+    min_visible_kp: int = 4
 
     # LOADER
     bs: int = 50
@@ -257,6 +258,8 @@ def _maybe_apply_grain_imaug(ds, cfg: Config):
         mask = np.asarray(batch["mask"]).copy()
         kp = np.asarray(batch["keypoints_2d_netin"], dtype=np.float32).copy()
         vis = np.asarray(batch["keypoints_visible"], dtype=bool).copy()
+        K = np.asarray(batch["K"], dtype=np.float32).copy()
+        w2c = np.asarray(batch["w2c"], dtype=np.float32).copy()
         h, w = image.shape[1:3]
 
         if cfg.imaug:
@@ -265,43 +268,77 @@ def _maybe_apply_grain_imaug(ds, cfg: Config):
             imgs_f = jnp.asarray(image, dtype=jnp.float32) / 255.0
             image = np.clip(np.asarray(_apply_augmax_color_batch(keys, imgs_f)) * 255.0, 0, 255).astype(np.uint8)
 
+        # Tentatively apply each transform and commit only if it leaves >= min_visible_kp
+        # in-frame keypoints, so post-aug visibility respects the same floor as the
+        # pre-batch dataset filter. Each commit also updates K / w2c so the stored
+        # extrinsics stay self-consistent with the post-aug image (assumes K's
+        # principal point is at image center, which holds after _shrink_crop_intrinsics_np).
+        min_vis = cfg.min_visible_kp
+        cx_img, cy_img = np.float32(w) * 0.5, np.float32(h) * 0.5
         for i in range(image.shape[0]):
             if cfg.rotate:
                 if rng.random() < 0.3:
                     angle = float(rng.uniform(-15.0, 15.0))
-                    image[i] = _rotate_image_np(image[i], angle, Image.BILINEAR, fill=0)
-                    mask[i] = _rotate_image_np(mask[i].astype(np.uint8), angle, Image.NEAREST, fill=0).astype(
-                        mask.dtype
-                    )
                     kp_i = _rotate_keypoints_np(kp[i], angle, h=h, w=w)
-                    vis[i] = vis[i] & _kp_in_bounds(kp_i, h, w)
-                    kp[i] = kp_i
+                    vis_i = vis[i] & _kp_in_bounds(kp_i, h, w)
+                    if int(vis_i.sum()) >= min_vis:
+                        image[i] = _rotate_image_np(image[i], angle, Image.BILINEAR, fill=0)
+                        mask[i] = _rotate_image_np(mask[i].astype(np.uint8), angle, Image.NEAREST, fill=0).astype(
+                            mask.dtype
+                        )
+                        # Image rotation about its center = camera Rz rotation about the
+                        # optical axis (because K's principal point sits at image center).
+                        # PIL rotates pixels CCW for +angle; that corresponds to rotating
+                        # the camera CW about +Z, i.e. Rz(-angle) on w2c from the left.
+                        a = np.deg2rad(np.float32(-angle))
+                        ca, sa = np.cos(a), np.sin(a)
+                        Rz = np.eye(4, dtype=np.float32)
+                        Rz[0, 0] = ca
+                        Rz[0, 1] = -sa
+                        Rz[1, 0] = sa
+                        Rz[1, 1] = ca
+                        w2c[i] = Rz @ w2c[i]
+                        vis[i] = vis_i
+                        kp[i] = kp_i
 
                 if rng.random() < 0.5:
                     tx = float(rng.uniform(-0.1 * w, 0.1 * w))
                     ty = float(rng.uniform(-0.1 * h, 0.1 * h))
-                    image[i] = _translate_image_np(image[i], tx, ty, resample=Image.BILINEAR, fill=0)
-                    mask[i] = _translate_image_np(
-                        mask[i].astype(np.uint8), tx, ty, resample=Image.NEAREST, fill=0
-                    ).astype(mask.dtype)
                     kp_i = kp[i].copy()
                     kp_i[:, 0] += tx
                     kp_i[:, 1] += ty
-                    vis[i] = vis[i] & _kp_in_bounds(kp_i, h, w)
-                    kp[i] = kp_i
+                    vis_i = vis[i] & _kp_in_bounds(kp_i, h, w)
+                    if int(vis_i.sum()) >= min_vis:
+                        image[i] = _translate_image_np(image[i], tx, ty, resample=Image.BILINEAR, fill=0)
+                        mask[i] = _translate_image_np(
+                            mask[i].astype(np.uint8), tx, ty, resample=Image.NEAREST, fill=0
+                        ).astype(mask.dtype)
+                        # Pixel translation = shift of K's principal point.
+                        K[i, 0, 2] += np.float32(tx)
+                        K[i, 1, 2] += np.float32(ty)
+                        vis[i] = vis_i
+                        kp[i] = kp_i
 
                 if rng.random() < 0.5:
                     scale = float(rng.uniform(0.85, 1.15))
-                    image[i] = _zoom_image_np(image[i], scale, resample=Image.BILINEAR, fill=0)
-                    mask[i] = _zoom_image_np(mask[i].astype(np.uint8), scale, resample=Image.NEAREST, fill=0).astype(
-                        mask.dtype
-                    )
-                    cx, cy = np.float32(w) * 0.5, np.float32(h) * 0.5
                     kp_i = kp[i].copy()
-                    kp_i[:, 0] = (kp_i[:, 0] - cx) * scale + cx
-                    kp_i[:, 1] = (kp_i[:, 1] - cy) * scale + cy
-                    vis[i] = vis[i] & _kp_in_bounds(kp_i, h, w)
-                    kp[i] = kp_i
+                    kp_i[:, 0] = (kp_i[:, 0] - cx_img) * scale + cx_img
+                    kp_i[:, 1] = (kp_i[:, 1] - cy_img) * scale + cy_img
+                    vis_i = vis[i] & _kp_in_bounds(kp_i, h, w)
+                    if int(vis_i.sum()) >= min_vis:
+                        image[i] = _zoom_image_np(image[i], scale, resample=Image.BILINEAR, fill=0)
+                        mask[i] = _zoom_image_np(
+                            mask[i].astype(np.uint8), scale, resample=Image.NEAREST, fill=0
+                        ).astype(mask.dtype)
+                        # Zoom-about-center: scale focal length; principal point unchanged
+                        # because it already sits at image center.
+                        s = np.float32(scale)
+                        K[i, 0, 0] *= s
+                        K[i, 1, 1] *= s
+                        K[i, 0, 2] = (K[i, 0, 2] - cx_img) * s + cx_img
+                        K[i, 1, 2] = (K[i, 1, 2] - cy_img) * s + cy_img
+                        vis[i] = vis_i
+                        kp[i] = kp_i
 
         return {
             **batch,
@@ -310,6 +347,8 @@ def _maybe_apply_grain_imaug(ds, cfg: Config):
             "keypoints_2d_netin": kp,
             "keypoints_2d_norm": _normalize_kp2d_np(kp, h=h, w=w),
             "keypoints_visible": vis,
+            "K": K,
+            "w2c": w2c,
         }
 
     return ds.random_map(aug)
@@ -395,7 +434,11 @@ def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
         kp2d_raw = kp2d_raw[0]
     visible = kp2d_raw[:, 2] > 0.5
 
-    joints_arr = np.asarray(sample["proprio"]["joints"], dtype=np.float32).reshape(-1, 7)
+    # xgym proprio stores joints in radians; the rest of the pipeline (model
+    # proprio normalisation + every downstream `np.deg2rad(q[:7])` in metrics
+    # and viz) is built around the synth convention of degrees. Convert here so
+    # q[:7] is always degrees regardless of source.
+    joints_arr = np.rad2deg(np.asarray(sample["proprio"]["joints"], dtype=np.float32).reshape(-1, 7))
     joints = joints_arr[0]
     gripper_arr = np.asarray(sample["proprio"]["gripper"], dtype=np.float32).reshape(-1)
     gripper = gripper_arr[:1]
@@ -408,6 +451,16 @@ def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
     kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw[:, :2], raw_h, raw_w, net_h, net_w)
     kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
     K = _shrink_crop_intrinsics_np(K_raw, raw_h, raw_w, net_h, net_w)
+
+    # Visibility from prerender is raw-frame; intersect with the net-in crop so
+    # the dataset filter and downstream metrics see in-frame-only visibility.
+    in_crop = (
+        (kp2d_netin[:, 0] >= 0.0)
+        & (kp2d_netin[:, 0] < float(net_w))
+        & (kp2d_netin[:, 1] >= 0.0)
+        & (kp2d_netin[:, 1] < float(net_h))
+    )
+    visible = visible & in_crop
 
     return {
         "image": image,
@@ -594,8 +647,12 @@ def _default_intrinsics_np(h: int, w: int) -> np.ndarray:
 
 
 def _opencv_w2c_np(w2c_raw: np.ndarray) -> np.ndarray:
-    w2c = np.asarray(w2c_raw, dtype=np.float32).T
-    flip = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+    # Synth data is rendered in Mitsuba (camera convention: +X right, +Y up,
+    # +Z forward, with projection x_img = cx - fx*x/z, y_img = cy - fy*y/z —
+    # i.e. X and Y in camera-frame are flipped relative to OpenCV). Convert
+    # Mitsuba camera-frame → OpenCV camera-frame: flip X and Y.
+    w2c = np.asarray(w2c_raw, dtype=np.float32)
+    flip = np.diag([-1.0, -1.0, 1.0]).astype(np.float32)
     out = np.eye(4, dtype=np.float32)
     out[:3, :3] = flip @ w2c[:3, :3]
     out[:3, 3] = flip @ w2c[:3, 3]
@@ -848,6 +905,19 @@ def _rot_err_deg(R_pred: np.ndarray, R_gt: np.ndarray) -> float:
     return float(np.rad2deg(np.arccos(np.clip(cos, -1.0, 1.0))))
 
 
+PNP_REPROJ_THRESH = 30.0  # px — reject degenerate PnP solutions before rasterizing
+
+
+def _pnp_reproj_err(
+    w2c: np.ndarray, joints_rad: np.ndarray, uv_px: np.ndarray, valid: np.ndarray, K: np.ndarray
+) -> float:
+    if not valid.any():
+        return float("inf")
+    pts_3d = fk_keypoints(joints_rad)
+    reproj = _project_points(w2c, pts_3d, K)
+    return float(np.linalg.norm(reproj[valid] - uv_px[valid], axis=-1).mean())
+
+
 def _mask_iou(pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:
     """Binary IoU between a float rasterized mask and a uint8 GT mask."""
     pred_bin = pred_mask > 0.5
@@ -869,7 +939,12 @@ def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return joints_rad, valid, w2c
 
 
-def _pose_metrics_one(q, uv_px, conf, K, w2c_gt, gt_mask: np.ndarray | None = None) -> dict:
+def _pose_metrics_one(q, uv_px, conf, K, kp2d_gt_px, kp_vis_gt, gt_mask: np.ndarray | None = None) -> dict:
+    """Compare pred-PnP against GT-PnP (both self-consistent with FK frame).
+
+    GT-PnP: solvePnP(FK 3D pts, stored kp2d_gt) → w2c that is FK-frame consistent.
+    Pred-PnP: solvePnP(FK 3D pts, predicted 2D kp) → w2c to compare against.
+    """
     joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
     pts_3d = fk_keypoints(joints_rad)
     out = {"valid_kp": float(valid.sum()), "success": 0.0}
@@ -877,22 +952,32 @@ def _pose_metrics_one(q, uv_px, conf, K, w2c_gt, gt_mask: np.ndarray | None = No
         return out
 
     reproj = _project_points(w2c_pred, pts_3d, K)
-    reproj_err = np.linalg.norm(reproj[valid] - uv_px[valid], axis=-1).mean()
-    pred_cam = _transform_points(w2c_pred, pts_3d)
-    gt_cam = _transform_points(w2c_gt, pts_3d)
-    add_mm = np.linalg.norm(pred_cam - gt_cam, axis=-1).mean() * 1000.0
-    out = {
-        **out,
-        "success": 1.0,
-        "reproj_px": float(reproj_err),
-        "add_mm": float(add_mm),
-        "rot_err_deg": _rot_err_deg(w2c_pred[:3, :3], w2c_gt[:3, :3]),
-        "trans_err_mm": float(np.linalg.norm(w2c_pred[:3, 3] - w2c_gt[:3, 3]) * 1000.0),
-    }
-    if gt_mask is not None:
+    reproj_err = float(np.linalg.norm(reproj[valid] - uv_px[valid], axis=-1).mean())
+    out = {**out, "success": 1.0, "reproj_px": reproj_err}
+
+    # GT-PnP for reference (FK-frame consistent; Blender w2c in batch is NOT).
+    vis_gt = np.asarray(kp_vis_gt, dtype=bool)
+    w2c_gt = None
+    if vis_gt.sum() >= 4:
+        with contextlib.suppress(Exception):
+            w2c_gt = solve_pnp(pts_3d[vis_gt], np.asarray(kp2d_gt_px, dtype=np.float64)[vis_gt], K)
+
+    if w2c_gt is not None:
+        pred_cam = _transform_points(w2c_pred, pts_3d)
+        gt_cam = _transform_points(w2c_gt, pts_3d)
+        add_mm = float(np.linalg.norm(pred_cam - gt_cam, axis=-1).mean() * 1000.0)
+        out = {
+            **out,
+            "add_mm": add_mm,
+            "rot_err_deg": _rot_err_deg(w2c_pred[:3, :3], w2c_gt[:3, :3]),
+            "trans_err_mm": float(np.linalg.norm(w2c_pred[:3, 3] - w2c_gt[:3, 3]) * 1000.0),
+        }
+
+    if gt_mask is not None and reproj_err <= PNP_REPROJ_THRESH:
         h, w = gt_mask.shape[-2], gt_mask.shape[-1]
         try:
-            rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h)
+            gripper_rad = float(np.asarray(q)[7]) if np.asarray(q).shape[-1] > 7 else None
+            rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h, gripper_rad=gripper_rad)
             out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
         except Exception:
             pass
@@ -906,20 +991,20 @@ def _pose_metrics_irl_one(q, uv_px, conf, K, gt_mask: np.ndarray) -> dict:
     primary signal for whether the estimated extrinsics are correct.
     """
     joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
-    pts_3d = fk_keypoints(joints_rad)
     out = {"valid_kp": float(valid.sum()), "success": 0.0}
     if w2c_pred is None:
         return out
 
-    reproj = _project_points(w2c_pred, pts_3d, K)
-    reproj_err = float(np.linalg.norm(reproj[valid] - uv_px[valid], axis=-1).mean()) if valid.any() else float("nan")
+    reproj_err = _pnp_reproj_err(w2c_pred, joints_rad, uv_px, valid, K)
     out = {**out, "success": 1.0, "reproj_px": reproj_err}
-    h, w = gt_mask.shape[-2], gt_mask.shape[-1]
-    try:
-        rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h)
-        out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
-    except Exception:
-        pass
+    if reproj_err <= PNP_REPROJ_THRESH:
+        h, w = gt_mask.shape[-2], gt_mask.shape[-1]
+        try:
+            gripper_rad = float(np.asarray(q)[7]) if np.asarray(q).shape[-1] > 7 else None
+            rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h, gripper_rad=gripper_rad)
+            out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
+        except Exception:
+            pass
     return out
 
 
@@ -932,11 +1017,20 @@ def pose_metrics(cfg: Config, batch: dict, out_dict: dict) -> dict:
     conf_np = np.asarray(jax.device_get(conf), dtype=np.float64)
     q_np = np.asarray(batch_np["q"], dtype=np.float64)
     K_np = np.asarray(batch_np["K"], dtype=np.float64)
-    w2c_np = np.asarray(batch_np["w2c"], dtype=np.float64)
-    mask_np = np.asarray(batch_np["mask"])  # (B, H, W)
+    kp2d_gt_np = np.asarray(batch_np["keypoints_2d_netin"], dtype=np.float64)
+    kp_vis_np = np.asarray(batch_np["keypoints_visible"])
+    mask_np = np.asarray(batch_np["mask"])
 
     rows = [
-        _pose_metrics_one(q_np[i], uv_np[i], conf_np[i], K_np[i], w2c_np[i], gt_mask=mask_np[i])
+        _pose_metrics_one(
+            q_np[i],
+            uv_np[i],
+            conf_np[i],
+            K_np[i],
+            kp2d_gt_px=kp2d_gt_np[i],
+            kp_vis_gt=kp_vis_np[i],
+            gt_mask=mask_np[i],
+        )
         for i in range(q_np.shape[0])
     ]
     vals = {}
@@ -1095,86 +1189,145 @@ def _image_u8(image: np.ndarray) -> np.ndarray:
 
 
 def _render_gt_rast_overlay(batch: dict, idx: int = 0):
-    """Render robot using the GT extrinsics stored in the batch (synth only).
+    """Render robot using the stored GT extrinsics (synth: Mitsuba w2c converted
+    via _opencv_w2c_np; IRL: calibrated load_w2c). Both are FK-frame consistent,
+    so we rasterize directly and avoid PnP's degeneracy with few visible kps.
 
-    This verifies the data pipeline is correct before trusting PnP estimates.
+    Panels:
+    - GT-w2c rast composited on image (should overlay GT silhouette)
+    - FK reprojection via GT-w2c vs stored kp2d (should match ~0 px)
+    - GT mask for comparison
     """
     import matplotlib.pyplot as plt
 
     image = _image_u8(batch["image"][idx])
     q = np.asarray(batch["q"][idx], dtype=np.float64)
     K = np.asarray(batch["K"][idx], dtype=np.float64)
-    w2c = np.asarray(batch["w2c"][idx], dtype=np.float64)
     gt_mask = np.asarray(batch["mask"][idx])
+    kp2d_gt = np.asarray(batch["keypoints_2d_netin"][idx], dtype=np.float64)
+    kp_vis = np.asarray(batch["keypoints_visible"][idx], dtype=bool)
+    w2c_gt = np.asarray(batch["w2c"][idx], dtype=np.float64)
     joints_rad = np.deg2rad(q[:7])
+    pts_3d = fk_keypoints(joints_rad)
 
-    panel = image
-    title = "GT extr rast"
+    reproj_err = (
+        float(np.linalg.norm(_project_points(w2c_gt, pts_3d, K) - kp2d_gt, axis=-1)[kp_vis].mean())
+        if kp_vis.any()
+        else float("nan")
+    )
+
+    panel = image.copy()
+    rast_title = f"GT-w2c rast  reproj={reproj_err:.1f}px"
     try:
-        rast = rasterize_robot(joints_rad, w2c, K, image.shape[1], image.shape[0])
+        gripper_rad = float(q[7]) if q.shape[-1] > 7 else None
+        rast = rasterize_robot(joints_rad, w2c_gt, K, image.shape[1], image.shape[0], gripper_rad=gripper_rad)
         panel = composite_robot(image, rast)
         iou = _mask_iou(rast, gt_mask)
-        title = f"GT extr rast  IoU={iou:.2f}"
+        rast_title = f"GT-w2c rast  IoU={iou:.2f}  reproj={reproj_err:.1f}px"
     except Exception as exc:
-        title = f"rast failed: {type(exc).__name__}"
+        rast_title = f"rast failed: {type(exc).__name__}  reproj={reproj_err:.1f}px"
 
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    reproj_image = image.copy()
+    try:
+        reproj_px = _project_points(w2c_gt, pts_3d, K)
+        reproj_title = f"GT-w2c reproj vs kp2d  err={reproj_err:.1f}px"
+    except Exception:
+        reproj_px = None
+        reproj_title = "reproj failed"
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     axes[0].imshow(panel)
-    axes[0].set_title(title)
+    axes[0].set_title(rast_title)
     axes[0].axis("off")
-    axes[1].imshow(gt_mask, cmap="gray")
-    axes[1].set_title("GT mask")
+
+    axes[1].imshow(reproj_image)
+    if reproj_px is not None:
+        axes[1].scatter(kp2d_gt[kp_vis, 0], kp2d_gt[kp_vis, 1], c="lime", s=20, label="stored kp2d")
+        axes[1].scatter(reproj_px[kp_vis, 0], reproj_px[kp_vis, 1], c="red", s=20, marker="x", label="GT-PnP reproj")
+        axes[1].legend(fontsize=6)
+    axes[1].set_title(reproj_title)
     axes[1].axis("off")
+
+    axes[2].imshow(gt_mask, cmap="gray")
+    axes[2].set_title("GT mask")
+    axes[2].axis("off")
+
     fig.tight_layout()
     out = wandb.Image(fig)
     plt.close(fig)
     return out
 
 
-def _render_extrinsics_comparison(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, max_samples: int = 8):
-    """Scatter plot of GT vs PnP-estimated camera translations, plus rotation errors.
+def _render_extrinsics_comparison(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, max_samples: int = 16):
+    """Error magnitude histograms: pred-PnP vs GT-PnP camera extrinsics.
 
-    Useful for watching extrinsic estimation quality improve over a run.
+    GT-PnP = solvePnP(FK 3D pts, stored kp2d) — FK-frame consistent.
+    Pred-PnP = solvePnP(FK 3D pts, predicted 2D kp).
+    Both histograms should shift left as training improves.
+    Bird's-eye shows GT-PnP camera positions (FK world frame, robot base at origin).
     """
     import matplotlib.pyplot as plt
 
     B = min(len(batch["q"]), max_samples)
-    gt_t, pred_t, rot_errs = [], [], []
+    trans_errs, rot_errs, gt_t = [], [], []
     for i in range(B):
         q = np.asarray(batch["q"][i], dtype=np.float64)
         uv = np.asarray(pred_uv[i], dtype=np.float64)
         conf = np.asarray(pred_conf[i], dtype=np.float64)
         K = np.asarray(batch["K"][i], dtype=np.float64)
-        w2c_gt = np.asarray(batch["w2c"][i], dtype=np.float64)
+        kp2d_gt = np.asarray(batch["keypoints_2d_netin"][i], dtype=np.float64)
+        kp_vis = np.asarray(batch["keypoints_visible"][i], dtype=bool)
+
+        joints_rad = np.deg2rad(np.asarray(q[:7], dtype=np.float64))
+        pts_3d = fk_keypoints(joints_rad)
+
+        # GT-PnP: self-consistent with FK frame.
+        w2c_gt = None
+        if kp_vis.sum() >= 4:
+            with contextlib.suppress(Exception):
+                w2c_gt = solve_pnp(pts_3d[kp_vis], kp2d_gt[kp_vis], K)
+        if w2c_gt is not None:
+            gt_t.append(w2c_gt[:3, 3])
+
         _, _, w2c_pred = _solve_pose_one(q, uv, conf, K)
-        gt_t.append(w2c_gt[:3, 3])
-        if w2c_pred is not None:
-            pred_t.append(w2c_pred[:3, 3])
+        if w2c_pred is not None and w2c_gt is not None:
+            trans_errs.append(np.linalg.norm(w2c_pred[:3, 3] - w2c_gt[:3, 3]) * 1000.0)
             rot_errs.append(_rot_err_deg(w2c_pred[:3, :3], w2c_gt[:3, :3]))
-        else:
-            pred_t.append(np.full(3, float("nan")))
-            rot_errs.append(float("nan"))
 
-    gt_t = np.array(gt_t)
-    pred_t = np.array(pred_t)
-    rot_errs = np.array(rot_errs)
-    labels = ("X (m)", "Y (m)", "Z (m)")
+    gt_t_arr = np.array(gt_t) if gt_t else None
+    trans_errs = np.array(trans_errs) if trans_errs else np.array([float("nan")])
+    rot_errs = np.array(rot_errs) if rot_errs else np.array([float("nan")])
+    n_success = len(trans_errs)
 
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    for ax, (dim, label) in zip(axes[:3], enumerate(labels)):
-        ax.scatter(gt_t[:, dim], pred_t[:, dim], c="steelblue", s=20, alpha=0.8)
-        lo = min(gt_t[:, dim].min(), np.nanmin(pred_t[:, dim]))
-        hi = max(gt_t[:, dim].max(), np.nanmax(pred_t[:, dim]))
-        ax.plot([lo, hi], [lo, hi], "k--", lw=1)
-        ax.set_xlabel(f"GT {label}")
-        ax.set_ylabel(f"Pred {label}")
-        ax.set_title(label)
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-    valid_rot = rot_errs[np.isfinite(rot_errs)]
-    axes[3].hist(valid_rot, bins=10, color="coral", edgecolor="white")
-    axes[3].set_xlabel("Rotation error (deg)")
-    axes[3].set_ylabel("Count")
-    axes[3].set_title(f"Rot err  mean={valid_rot.mean():.1f}°" if len(valid_rot) else "Rot err (no data)")
+    # Translation error histogram (mm)
+    valid_t = trans_errs[np.isfinite(trans_errs)]
+    axes[0].hist(valid_t, bins=12, color="steelblue", edgecolor="white")
+    axes[0].set_xlabel("Translation error (mm)")
+    axes[0].set_ylabel("Count")
+    mean_t = float(valid_t.mean()) if len(valid_t) else float("nan")
+    axes[0].set_title(f"Trans err  mean={mean_t:.0f}mm  ({n_success}/{B} solved)")
+
+    # Rotation error histogram (deg)
+    valid_r = rot_errs[np.isfinite(rot_errs)]
+    axes[1].hist(valid_r, bins=12, color="coral", edgecolor="white")
+    axes[1].set_xlabel("Rotation error (deg)")
+    axes[1].set_ylabel("Count")
+    mean_r = float(valid_r.mean()) if len(valid_r) else float("nan")
+    axes[1].set_title(f"Rot err  mean={mean_r:.1f}°")
+
+    # Bird's-eye XY view of GT-PnP camera translations (shows dataset coverage).
+    if gt_t_arr is not None:
+        axes[2].scatter(gt_t_arr[:, 0], gt_t_arr[:, 1], c="green", s=30, alpha=0.8)
+    else:
+        axes[2].text(0.5, 0.5, "no GT-PnP solutions", ha="center", transform=axes[2].transAxes)
+    axes[2].scatter([0], [0], c="black", s=60, marker="*", label="robot base")
+    axes[2].set_xlabel("X (m)")
+    axes[2].set_ylabel("Y (m)")
+    axes[2].set_title("GT camera positions (bird's-eye)")
+    axes[2].legend(fontsize=7)
+    axes[2].set_aspect("equal")
 
     fig.tight_layout()
     out = wandb.Image(fig)
@@ -1195,12 +1348,17 @@ def _render_pose_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray
     panel = image
     title = f"PnP failed ({valid.sum()} kp)"
     if w2c is not None:
-        try:
-            mask = rasterize_robot(joints_rad, w2c, K, image.shape[1], image.shape[0])
-            panel = composite_robot(image, mask)
-            title = f"pose overlay ({valid.sum()} kp)"
-        except Exception as exc:
-            title = f"raster failed: {type(exc).__name__}"
+        reproj_err = _pnp_reproj_err(w2c, joints_rad, uv, valid, K)
+        if reproj_err > PNP_REPROJ_THRESH:
+            title = f"PnP degenerate reproj={reproj_err:.0f}px ({valid.sum()} kp)"
+        else:
+            try:
+                gripper_rad = float(q[7]) if q.shape[-1] > 7 else None
+                mask = rasterize_robot(joints_rad, w2c, K, image.shape[1], image.shape[0], gripper_rad=gripper_rad)
+                panel = composite_robot(image, mask)
+                title = f"pose overlay reproj={reproj_err:.1f}px ({valid.sum()} kp)"
+            except Exception as exc:
+                title = f"raster failed: {type(exc).__name__}"
 
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
     ax.imshow(panel)

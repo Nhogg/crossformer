@@ -208,18 +208,23 @@ def rasterize_robot(
     width: int,
     height: int,
     robot=None,
+    gripper_rad: float | None = None,
 ) -> np.ndarray:
     """Render robot silhouette mask (H, W) using nvdiffrast.
 
     Returns float32 mask in [0, 1].
     """
     from crossformer.utils.callbacks.rast import _GpuRasterizer
+    from crossformer.utils.rig import GRIPPER_CLOSED_RAD
 
     if robot is None:
         robot = _get_robot_mesh()
 
     q = np.zeros((1, robot.actuated), dtype=np.float32)
     q[0, :7] = joints_rad
+    # Match render_robot_mask / Blender GT: gripper has its own DOF and must be set,
+    # otherwise the rendered silhouette around the fingers shrinks vs. the GT mask.
+    q[0, 7] = float(GRIPPER_CLOSED_RAD if gripper_rad is None else gripper_rad)
     verts = robot.posed_verts(q)  # (1, V, 4) homogeneous world-frame
 
     # build clip-space MVP from intrinsics + extrinsics

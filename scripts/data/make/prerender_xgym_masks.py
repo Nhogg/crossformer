@@ -186,7 +186,7 @@ def main() -> None:
     root = args.root.expanduser()
     cams = tuple(args.cams)
     print(f"reading {args.name} v{args.src_version} from {root}", flush=True)
-    src_builder = _open_src(args.name, args.src_version, args.branch, root)
+    src_builder, src_meta = _open_src(args.name, args.src_version, args.branch, root)
 
     if not {"image", "proprio"}.issubset(src_builder.writers):
         raise ValueError(f"expected image+proprio writers, got {list(src_builder.writers)}")
