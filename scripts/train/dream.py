@@ -8,7 +8,7 @@ from functools import partial
 import os
 from pathlib import Path
 
-from crossformer.utils.rig import K_for_size, load_w2c
+import augmax
 from flax import struct
 from flax.core import freeze, unfreeze
 from flax.training.train_state import TrainState
@@ -33,12 +33,13 @@ import tyro
 import crossformer.cn as cn
 from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
-from crossformer.data.grain.datasets import unpack_record
+from crossformer.data.grain.datasets import MultiArrayRecordSource, unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
+from crossformer.utils.rig import K_for_size, load_w2c
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
@@ -128,16 +129,16 @@ class Config:
     min_visible_kp: int = 5
 
     # LOADER
-    bs: int = 1
+    bs: int = 50
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
     irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
-    irl_image_keys: tuple[str, ...] = "side"
+    irl_image_keys: tuple[str, ...] = ("side",)
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
     n_preshard: int = 2  # prefetch sharded data
 
     coco_prob: float = 0.5
-    coco_dir: Path = Path.home() / "bela/datasets/coco/train2014"
+    coco_dir: Path = Path("/home/bela/datasets/coco/train2014/")
 
     # Checkpointing
     save_dir: Path | None = Path.home().expanduser()
@@ -192,7 +193,7 @@ def _rotate_keypoints_np(kp2d: np.ndarray, angle_deg: float, h: int, w: int) -> 
     return np.stack([c * x + s * y + cx, -s * x + c * y + cy], axis=-1).astype(np.float32)
 
 
-_augmax_color_chain = auxmax.Chain(
+_augmax_color_chain = augmax.Chain(
     augmax.ChannelShuffle(p=0.5),
     augmax.RandomGrayscale(p=0.5),
     augmax.ChannelDrop(),
@@ -212,6 +213,12 @@ def _apply_augmax_color(image: np.ndarray, rng: np.random.Generator) -> np.ndarr
     img_f = jnp.asarray(image, dtype=jnp.float32) / 255.0
     img_f = _augmax_color_chain(key, img_f)
     return np.clip(np.asarray(img_f) * 255.0, 0, 255).astype(np.uint8)
+
+
+@jax.jit
+def _apply_augmax_color_batch(keys: jax.Array, images: jax.Array) -> jax.Array:
+    """Apply augmax color transforms to a NHWC float32 batch, returns float32."""
+    return jax.vmap(_augmax_color_chain)(keys, images)
 
 
 def _translate_image_np(
@@ -252,9 +259,13 @@ def _maybe_apply_grain_imaug(ds, cfg: Config):
         vis = np.asarray(batch["keypoints_visible"], dtype=bool).copy()
         h, w = image.shape[1:3]
 
+        if cfg.imaug:
+            base_key = jax.random.key(rng.integers(2**32 - 1, dtype=np.uint32))
+            keys = jax.random.split(base_key, image.shape[0])
+            imgs_f = jnp.asarray(image, dtype=jnp.float32) / 255.0
+            image = np.clip(np.asarray(_apply_augmax_color_batch(keys, imgs_f)) * 255.0, 0, 255).astype(np.uint8)
+
         for i in range(image.shape[0]):
-            if cfg.imaug:
-                image[i] = _apply_augmax_color(image[i], rng)
             if cfg.rotate:
                 if rng.random() < 0.3:
                     angle = float(rng.uniform(-15.0, 15.0))
@@ -426,7 +437,7 @@ def make_dataset(cfg: Config):
         real = grain.MapDataset.source(real_src).seed(43).shuffle().repeat()
         if not isinstance(real_src, MultiArrayRecordSource):
             real = real.map(unpack_record)
-        real = real.map(_drop_low_cam).map(lambda s: {**s, "_kind": "real"})
+        real = real.map(_drop_low_cams).map(lambda s: {**s, "_kind": "real"})
         md = grain.MapDataset.mix([synth, real], weights=[1.0 - cfg.real_prob, cfg.real_prob])
     else:
         md = synth
@@ -621,6 +632,17 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
     K = np.asarray(sample["camera"]["intr"]["K"], dtype=np.float32)
     w2c = _opencv_w2c_np(sample["camera"]["extr"]["w2c"])
+    # Intersect JSON visibility with crop-zone membership so that keypoints in the
+    # left/right cropped-out columns are not treated as visible (they have negative
+    # netin coords which cause scatter-plot dots to appear outside the image and
+    # empty GT heatmap entries that destabilise the focal loss).
+    in_crop = (
+        (kp2d_netin[:, 0] >= 0.0)
+        & (kp2d_netin[:, 0] < float(net_w))
+        & (kp2d_netin[:, 1] >= 0.0)
+        & (kp2d_netin[:, 1] < float(net_h))
+    )
+    kp_visible = np.asarray(sample["info"]["kp_visible"], dtype=bool) & in_crop
     return {
         "image": image,
         "mask": mask,
@@ -628,7 +650,7 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
         "keypoints_2d_norm": kp2d_norm,
         "keypoints_2d_netin": kp2d_netin,
         "keypoints_2d_raw": kp2d_raw,
-        "keypoints_visible": np.asarray(sample["info"]["kp_visible"], dtype=bool),
+        "keypoints_visible": kp_visible,
         "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
         "w2c": w2c,
     }
@@ -649,23 +671,11 @@ def _build_heatmaps_one(
     pixel_v = v.astype(jnp.int32)
     dist2 = (xs - u[:, None, None]) ** 2 + (ys - v[:, None, None]) ** 2
     heatmaps = jnp.exp(-dist2 / (2.0 * sigma**2))
-    radius = int(sigma * 2)
-    in_window = (
-        (xs[None, :, :] >= (pixel_u[:, None, None] - radius))
-        & (xs[None, :, :] <= (pixel_u[:, None, None] + radius))
-        & (ys[None, :, :] >= (pixel_v[:, None, None] - radius))
-        & (ys[None, :, :] <= (pixel_v[:, None, None] + radius))
-    )
-    in_bounds = (
-        (pixel_u - radius >= 0)
-        & (pixel_u + radius + 1 < image_w)
-        & (pixel_v - radius >= 0)
-        & (pixel_v + radius + 1 < image_h)
-    )
-    # Match DREAM: avoid malformed clipped Gaussians near edges, at the cost of
-    # throwing away supervision for those edge-near keypoints.
+    in_bounds = (pixel_u >= 0) & (pixel_u < image_w) & (pixel_v >= 0) & (pixel_v < image_h)
+    # Use the full Gaussian as the target so focal loss can suppress nearby negatives
+    # via (1-target)^beta. in_bounds still drops edge keypoints with clipped Gaussians.
     mask = visible[:, None, None]
-    mask = mask & in_bounds[:, None, None] & in_window
+    mask = mask & in_bounds[:, None, None]
     return jnp.where(mask, heatmaps, jnp.zeros_like(heatmaps))
 
 
@@ -838,18 +848,28 @@ def _rot_err_deg(R_pred: np.ndarray, R_gt: np.ndarray) -> float:
     return float(np.rad2deg(np.arccos(np.clip(cos, -1.0, 1.0))))
 
 
+def _mask_iou(pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:
+    """Binary IoU between a float rasterized mask and a uint8 GT mask."""
+    pred_bin = pred_mask > 0.5
+    gt_bin = gt_mask > 0
+    inter = (pred_bin & gt_bin).sum()
+    union = (pred_bin | gt_bin).sum()
+    return float(inter / union) if union > 0 else float("nan")
+
+
 def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     joints_rad = np.deg2rad(np.asarray(q[:7], dtype=np.float64))
     pts_3d = fk_keypoints(joints_rad)
     valid = np.isfinite(uv_px).all(axis=-1) & np.isfinite(conf) & (conf > KP_CONF_THRESHOLD)
     try:
-        w2c = solve_pnp(pts_3d, uv_px, K, valid)
+        # Pre-filter by valid mask so synth_viz.solve_pnp sees only confident points.
+        w2c = solve_pnp(pts_3d[valid], uv_px[valid], K)
     except Exception:
         w2c = None
     return joints_rad, valid, w2c
 
 
-def _pose_metrics_one(q, uv_px, conf, K, w2c_gt) -> dict:
+def _pose_metrics_one(q, uv_px, conf, K, w2c_gt, gt_mask: np.ndarray | None = None) -> dict:
     joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
     pts_3d = fk_keypoints(joints_rad)
     out = {"valid_kp": float(valid.sum()), "success": 0.0}
@@ -861,7 +881,7 @@ def _pose_metrics_one(q, uv_px, conf, K, w2c_gt) -> dict:
     pred_cam = _transform_points(w2c_pred, pts_3d)
     gt_cam = _transform_points(w2c_gt, pts_3d)
     add_mm = np.linalg.norm(pred_cam - gt_cam, axis=-1).mean() * 1000.0
-    return {
+    out = {
         **out,
         "success": 1.0,
         "reproj_px": float(reproj_err),
@@ -869,6 +889,38 @@ def _pose_metrics_one(q, uv_px, conf, K, w2c_gt) -> dict:
         "rot_err_deg": _rot_err_deg(w2c_pred[:3, :3], w2c_gt[:3, :3]),
         "trans_err_mm": float(np.linalg.norm(w2c_pred[:3, 3] - w2c_gt[:3, 3]) * 1000.0),
     }
+    if gt_mask is not None:
+        h, w = gt_mask.shape[-2], gt_mask.shape[-1]
+        try:
+            rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h)
+            out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
+        except Exception:
+            pass
+    return out
+
+
+def _pose_metrics_irl_one(q, uv_px, conf, K, gt_mask: np.ndarray) -> dict:
+    """Like _pose_metrics_one but without GT w2c — for IRL where extrinsics are unknown.
+
+    Mask IoU between the rasterized PnP estimate and the stored GT mask is the
+    primary signal for whether the estimated extrinsics are correct.
+    """
+    joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
+    pts_3d = fk_keypoints(joints_rad)
+    out = {"valid_kp": float(valid.sum()), "success": 0.0}
+    if w2c_pred is None:
+        return out
+
+    reproj = _project_points(w2c_pred, pts_3d, K)
+    reproj_err = float(np.linalg.norm(reproj[valid] - uv_px[valid], axis=-1).mean()) if valid.any() else float("nan")
+    out = {**out, "success": 1.0, "reproj_px": reproj_err}
+    h, w = gt_mask.shape[-2], gt_mask.shape[-1]
+    try:
+        rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h)
+        out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
+    except Exception:
+        pass
+    return out
 
 
 def pose_metrics(cfg: Config, batch: dict, out_dict: dict) -> dict:
@@ -881,10 +933,14 @@ def pose_metrics(cfg: Config, batch: dict, out_dict: dict) -> dict:
     q_np = np.asarray(batch_np["q"], dtype=np.float64)
     K_np = np.asarray(batch_np["K"], dtype=np.float64)
     w2c_np = np.asarray(batch_np["w2c"], dtype=np.float64)
+    mask_np = np.asarray(batch_np["mask"])  # (B, H, W)
 
-    rows = [_pose_metrics_one(q_np[i], uv_np[i], conf_np[i], K_np[i], w2c_np[i]) for i in range(q_np.shape[0])]
+    rows = [
+        _pose_metrics_one(q_np[i], uv_np[i], conf_np[i], K_np[i], w2c_np[i], gt_mask=mask_np[i])
+        for i in range(q_np.shape[0])
+    ]
     vals = {}
-    for key in ("valid_kp", "success", "reproj_px", "add_mm", "rot_err_deg", "trans_err_mm"):
+    for key in ("valid_kp", "success", "reproj_px", "add_mm", "rot_err_deg", "trans_err_mm", "mask_iou"):
         xs = np.asarray([r[key] for r in rows if key in r], dtype=np.float32)
         vals[key] = float(xs.mean()) if len(xs) else float("nan")
     adds = np.asarray([r["add_mm"] for r in rows if "add_mm" in r], dtype=np.float32)
@@ -896,6 +952,32 @@ def pose_metrics(cfg: Config, batch: dict, out_dict: dict) -> dict:
         )
     else:
         vals["add_auc_100mm"] = float("nan")
+    return vals
+
+
+def pose_metrics_irl(cfg: Config, batch: dict, out_dict: dict) -> dict:
+    """Extrinsics quality metrics for IRL batches (no GT w2c available).
+
+    The primary signal is mask_iou: how well does the PnP-recovered rasterized
+    robot silhouette match the GT pre-rendered mask stored in the batch.
+    """
+    pred_uv, conf = extract_keypoints(out_dict["pred_heatmaps"])
+    _, _, out_h, out_w = out_dict["pred_heatmaps"].shape
+    pred_uv = _denormalize_kp2d(pred_uv / jnp.array([out_w, out_h], dtype=jnp.float32), *cfg.net_in_size)
+    batch_np = jax.device_get(batch)
+    uv_np = np.asarray(jax.device_get(pred_uv), dtype=np.float64)
+    conf_np = np.asarray(jax.device_get(conf), dtype=np.float64)
+    q_np = np.asarray(batch_np["q"], dtype=np.float64)
+    K_np = np.asarray(batch_np["K"], dtype=np.float64)
+    mask_np = np.asarray(batch_np["mask"])
+
+    rows = [
+        _pose_metrics_irl_one(q_np[i], uv_np[i], conf_np[i], K_np[i], gt_mask=mask_np[i]) for i in range(q_np.shape[0])
+    ]
+    vals = {}
+    for key in ("valid_kp", "success", "reproj_px", "mask_iou"):
+        xs = np.asarray([r[key] for r in rows if key in r], dtype=np.float32)
+        vals[key] = float(xs.mean()) if len(xs) else float("nan")
     return vals
 
 
@@ -1012,6 +1094,94 @@ def _image_u8(image: np.ndarray) -> np.ndarray:
     return (np.clip(image, 0.0, 1.0) * 255).astype(np.uint8)
 
 
+def _render_gt_rast_overlay(batch: dict, idx: int = 0):
+    """Render robot using the GT extrinsics stored in the batch (synth only).
+
+    This verifies the data pipeline is correct before trusting PnP estimates.
+    """
+    import matplotlib.pyplot as plt
+
+    image = _image_u8(batch["image"][idx])
+    q = np.asarray(batch["q"][idx], dtype=np.float64)
+    K = np.asarray(batch["K"][idx], dtype=np.float64)
+    w2c = np.asarray(batch["w2c"][idx], dtype=np.float64)
+    gt_mask = np.asarray(batch["mask"][idx])
+    joints_rad = np.deg2rad(q[:7])
+
+    panel = image
+    title = "GT extr rast"
+    try:
+        rast = rasterize_robot(joints_rad, w2c, K, image.shape[1], image.shape[0])
+        panel = composite_robot(image, rast)
+        iou = _mask_iou(rast, gt_mask)
+        title = f"GT extr rast  IoU={iou:.2f}"
+    except Exception as exc:
+        title = f"rast failed: {type(exc).__name__}"
+
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    axes[0].imshow(panel)
+    axes[0].set_title(title)
+    axes[0].axis("off")
+    axes[1].imshow(gt_mask, cmap="gray")
+    axes[1].set_title("GT mask")
+    axes[1].axis("off")
+    fig.tight_layout()
+    out = wandb.Image(fig)
+    plt.close(fig)
+    return out
+
+
+def _render_extrinsics_comparison(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, max_samples: int = 8):
+    """Scatter plot of GT vs PnP-estimated camera translations, plus rotation errors.
+
+    Useful for watching extrinsic estimation quality improve over a run.
+    """
+    import matplotlib.pyplot as plt
+
+    B = min(len(batch["q"]), max_samples)
+    gt_t, pred_t, rot_errs = [], [], []
+    for i in range(B):
+        q = np.asarray(batch["q"][i], dtype=np.float64)
+        uv = np.asarray(pred_uv[i], dtype=np.float64)
+        conf = np.asarray(pred_conf[i], dtype=np.float64)
+        K = np.asarray(batch["K"][i], dtype=np.float64)
+        w2c_gt = np.asarray(batch["w2c"][i], dtype=np.float64)
+        _, _, w2c_pred = _solve_pose_one(q, uv, conf, K)
+        gt_t.append(w2c_gt[:3, 3])
+        if w2c_pred is not None:
+            pred_t.append(w2c_pred[:3, 3])
+            rot_errs.append(_rot_err_deg(w2c_pred[:3, :3], w2c_gt[:3, :3]))
+        else:
+            pred_t.append(np.full(3, float("nan")))
+            rot_errs.append(float("nan"))
+
+    gt_t = np.array(gt_t)
+    pred_t = np.array(pred_t)
+    rot_errs = np.array(rot_errs)
+    labels = ("X (m)", "Y (m)", "Z (m)")
+
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    for ax, (dim, label) in zip(axes[:3], enumerate(labels)):
+        ax.scatter(gt_t[:, dim], pred_t[:, dim], c="steelblue", s=20, alpha=0.8)
+        lo = min(gt_t[:, dim].min(), np.nanmin(pred_t[:, dim]))
+        hi = max(gt_t[:, dim].max(), np.nanmax(pred_t[:, dim]))
+        ax.plot([lo, hi], [lo, hi], "k--", lw=1)
+        ax.set_xlabel(f"GT {label}")
+        ax.set_ylabel(f"Pred {label}")
+        ax.set_title(label)
+
+    valid_rot = rot_errs[np.isfinite(rot_errs)]
+    axes[3].hist(valid_rot, bins=10, color="coral", edgecolor="white")
+    axes[3].set_xlabel("Rotation error (deg)")
+    axes[3].set_ylabel("Count")
+    axes[3].set_title(f"Rot err  mean={valid_rot.mean():.1f}°" if len(valid_rot) else "Rot err (no data)")
+
+    fig.tight_layout()
+    out = wandb.Image(fig)
+    plt.close(fig)
+    return out
+
+
 def _render_pose_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, idx: int = 0):
     import matplotlib.pyplot as plt
 
@@ -1059,32 +1229,39 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int, prefix: s
         image_w=out_w,
         sigma=belief_sigma(cfg.sigma_pct, out_h, out_w),
     )
+    batch_np = jax.device_get(batch)
     log = {
         f"{prefix}/predictions": _render_overlay(
             {
-                "image": jax.device_get(batch["image"]),
+                "image": batch_np["image"],
                 "keypoints_2d": jax.device_get(gt_uv),
-                "keypoints_visible": jax.device_get(batch["keypoints_visible"]),
+                "keypoints_visible": batch_np["keypoints_visible"],
             },
             jax.device_get(pred_uv),
             jax.device_get(pred_conf),
             jax.device_get(pred_heatmaps),
         ),
-        f"{prefix}/gt": _render_heatmap_overlay(jax.device_get(batch["image"][0]), jax.device_get(gt_heatmaps[0])),
+        f"{prefix}/gt": _render_heatmap_overlay(batch_np["image"][0], jax.device_get(gt_heatmaps[0])),
         f"{prefix}/mask": _render_mask_overlay(
-            jax.device_get(batch["image"]),
-            jax.device_get(batch["mask"]),
+            batch_np["image"],
+            batch_np["mask"],
             title="gt mask",
         ),
         f"{prefix}/pose_overlay": _render_pose_overlay(
-            jax.device_get(batch),
+            batch_np,
             jax.device_get(pred_uv),
             jax.device_get(pred_conf),
         ),
     }
-    if "pred_mask" in out_dict:
+    # GT extrinsics panels: only meaningful for synth data (has w2c in batch).
+    if "w2c" in batch_np:
+        log[f"{prefix}/gt_rast"] = _render_gt_rast_overlay(batch_np)
+        log[f"{prefix}/extr_compare"] = _render_extrinsics_comparison(
+            batch_np, jax.device_get(pred_uv), jax.device_get(pred_conf)
+        )
+    if "pred_mask" in out_dict and prefix != "irl":
         log[f"{prefix}/pred_mask"] = _render_mask_overlay(
-            jax.device_get(batch["image"]),
+            batch_np["image"],
             jax.device_get(out_dict["pred_mask"]),
             title="pred mask",
         )
@@ -1259,6 +1436,16 @@ def _print_shapes(shapes):
     print(table)
 
 
+def make_irl_dataset(cfg: Config):
+    ds = grain.MapDataset.source(cfg.irl_mix.source).seed(cfg.seed).repeat()
+    ds = ds.map(_drop_low_cams)
+    ds = ds.map(partial(prepare_irl_sample_np, cfg))
+    ds = ds.batch(cfg.bs, drop_remainder=True)
+    ds = ds.map(make_shard_fn())
+    ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=cfg.n_preshard)
+    return ds
+
+
 def main(cfg: Config):
     timer = Timer()
     ndev = len(jax.devices())
@@ -1266,7 +1453,7 @@ def main(cfg: Config):
         raise ValueError(f"bs={cfg.bs} must be divisible by device_count={ndev}")
     ds = make_dataset(cfg)
     dsit = iter(ds)
-    irl_dsit = iter(make_irl_dataset(cfg)) if cfg.wandb.use and cfg.viz.every > 0 else None
+    irl_dsit = iter(make_irl_dataset(cfg)) if cfg.wandb.use and cfg.viz.every > 0 and cfg.real_prob > 0.0 else None
     batch = next(dsit)
 
     print(Rule("DREAM Prepared Sample", style="bold magenta"))
@@ -1364,6 +1551,9 @@ def main(cfg: Config):
                 irl_batch = next(irl_dsit)
                 irl_out = predict_heatmap_out(model, state.params, irl_batch, out_h, out_w)
                 maybe_log_viz(cfg, irl_batch, irl_out, step=step, prefix="irl")
+                with timer("irl_pose"):
+                    irl_pose = pose_metrics_irl(cfg, irl_batch, irl_out)
+                cfg.wandb.log({"irl_pose": irl_pose}, step=step)
         if cfg.save_interval > 0 and (step + 1) % cfg.save_interval == 0 and save_dir is not None:
             with timer("ckpt"):
                 save_callback.save(_checkpoint_state(state), step + 1)
