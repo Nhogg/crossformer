@@ -123,7 +123,7 @@ class Config:
     verbose: bool = False
 
     # Aug
-    imaug: bool = False
+    imaug: bool = True
     rotate: bool = True
     real_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
     real_prob: float = 0.3
@@ -1611,7 +1611,7 @@ def main(cfg: Config):
         raise ValueError(f"bs={cfg.bs} must be divisible by device_count={ndev}")
     ds = make_dataset(cfg)
     dsit = iter(ds)
-    irl_dsit = iter(make_irl_dataset(cfg)) if cfg.wandb.use and cfg.viz.every > 0 and cfg.real_prob > 0.0 else None
+    irl_dsit = iter(make_irl_dataset(cfg)) if cfg.wandb.use and cfg.viz.every > 0 else None
     batch = next(dsit)
 
     print(Rule("DREAM Prepared Sample", style="bold magenta"))
