@@ -193,11 +193,47 @@ def solve_pnp(pts_3d: np.ndarray, pts_2d_px: np.ndarray, K: np.ndarray) -> np.nd
             pts_2d_px[mask].astype(np.float64),
             K,
             flags=cv2.SOLVEPNP_ITERATIVE,
-            useExtrinsicsGuess=True,
+            useExtrinsicGuess=True,
             rvec=rvec,
             tvec=tvec,
         )
 
+    if not ok:
+        return None
+    R, _ = cv2.Rodrigues(rvec)
+    w2c = np.eye(4, dtype=np.float64)
+    w2c[:3, :3] = R
+    w2c[:3, 3] = tvec.ravel()
+    return w2c
+
+
+# Dream style random sample consensur
+def solve_pnp_ransac(
+    pts_3d: np.ndarray, pts_2d_px: np.ndarray, K: np.ndarray, inlier_thresh_px: float = 5.0
+) -> np.ndarray | None:
+    if pts_3d.shape[0] < 4:
+        return None
+    ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+        pts_3d.astype(np.float64),
+        pts_2d_px.astype(np.float64),
+        K,
+        np.array([]),
+        reprojectionError=inlier_thresh_px,
+        flags=cv2.SOLVEPNP_SQPNP,
+    )
+    if not ok or inliers is None:
+        return None
+    inlier_idx = inliers.ravel()
+    ok, rvec, tvec = cv2.solvePnP(
+        pts_3d[inlier_idx].astype(np.float64),
+        pts_2d_px[inlier_idx].astype(np.float64),
+        K,
+        np.array([]),
+        flags=cv2.SOLVEPNP_ITERATIVE,
+        useExtrinsicsGuess=True,
+        rvec=rvec,
+        tvec=tvec,
+    )
     if not ok:
         return None
     R, _ = cv2.Rodrigues(rvec)
