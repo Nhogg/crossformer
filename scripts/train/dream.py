@@ -39,7 +39,13 @@ from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
-from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
+from crossformer.utils.callbacks.synth_viz import (
+    composite_robot,
+    fk_keypoints,
+    rasterize_robot,
+    solve_pnp,
+    solve_pnp_ransac,
+)
 from crossformer.utils.rig import K_for_size, load_w2c
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
@@ -933,7 +939,7 @@ def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarr
     valid = np.isfinite(uv_px).all(axis=-1) & np.isfinite(conf) & (conf > KP_CONF_THRESHOLD)
     try:
         # Pre-filter by valid mask so synth_viz.solve_pnp sees only confident points.
-        w2c = solve_pnp(pts_3d[valid], uv_px[valid], K)
+        w2c = solve_pnp_ransac(pts_3d[valid], uv_px[valid], K)
     except Exception:
         w2c = None
     return joints_rad, valid, w2c
