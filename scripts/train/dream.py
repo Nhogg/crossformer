@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 import augmax
+import cv2
 from flax import struct
 from flax.core import freeze, unfreeze
 from flax.training.train_state import TrainState
@@ -44,7 +45,6 @@ from crossformer.utils.callbacks.synth_viz import (
     fk_keypoints,
     rasterize_robot,
     solve_pnp,
-    solve_pnp_ransac,
 )
 from crossformer.utils.rig import K_for_size, load_w2c
 from crossformer.utils.spec import spec
@@ -54,6 +54,9 @@ import wandb
 KP_CONF_THRESHOLD = 0.03
 KP_SMOOTH_SIGMA = 1.0
 KP_SMOOTH_RADIUS = 2
+KP_PEAK_THRESHOLD = 0.01
+KP_PEAK_AMBIGUITY_GAP = 0.25
+KP_MISSING_VALUE = -999.999
 ADD_THRESHOLDS_MM = np.linspace(0.0, 100.0, 100, dtype=np.float32)
 
 
@@ -253,6 +256,20 @@ def _zoom_image_np(image: np.ndarray, scale: float, resample: int = Image.BILINE
 
 def _kp_in_bounds(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
     return (kp2d[:, 0] >= 0.0) & (kp2d[:, 0] < np.float32(w)) & (kp2d[:, 1] >= 0.0) & (kp2d[:, 1] < np.float32(h))
+
+
+def _kp_render_mask(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
+    kp2d = np.asarray(kp2d)
+    return np.isfinite(kp2d).all(axis=-1) & _kp_in_bounds(kp2d, h, w)
+
+
+def _plot_image(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim >= 2 and arr.shape[0] > 0 and arr.shape[1] > 0:
+        return arr
+    if arr.ndim == 3:
+        return np.zeros((1, 1, arr.shape[2]), dtype=arr.dtype)
+    return np.zeros((1, 1), dtype=arr.dtype)
 
 
 def _maybe_apply_grain_imaug(ds, cfg: Config):
@@ -876,16 +893,25 @@ def _extract_keypoint_channel(hm: jax.Array) -> tuple[jax.Array, jax.Array]:
     hm = _smooth_heatmap(hm)
     h, w = hm.shape
     flat = hm.reshape(h * w)
-    idx = jnp.argmax(flat)
-    conf = flat[idx]
-    ys = jnp.arange(h, dtype=jnp.float32)[:, None]
-    xs = jnp.arange(w, dtype=jnp.float32)[None, :]
-    weights = jnp.where(hm >= KP_CONF_THRESHOLD, jnp.maximum(hm, 0.0), 0.0)
-    denom = weights.sum()
-    denom_safe = jnp.maximum(denom, 1e-8)
-    uv_sub = jnp.array([(weights * xs).sum() / denom_safe, (weights * ys).sum() / denom_safe], dtype=jnp.float32)
-    uv_argmax = jnp.array([idx % w, idx // w], dtype=jnp.float32)
-    return jnp.where(denom > 0, uv_sub, uv_argmax), conf
+    local_max = jax.lax.reduce_window(
+        hm,
+        -jnp.inf,
+        jax.lax.max,
+        window_dimensions=(3, 3),
+        window_strides=(1, 1),
+        padding="SAME",
+    )
+    is_peak = (hm >= local_max) & (hm > KP_PEAK_THRESHOLD)
+    peak_vals = jnp.where(is_peak.reshape(h * w), flat, -jnp.inf)
+    best_idx = jnp.argmax(peak_vals)
+    best = jnp.max(peak_vals)
+    second_vals = peak_vals.at[best_idx].set(-jnp.inf)
+    second = jnp.max(second_vals)
+    has_peak = jnp.isfinite(best)
+    unambiguous = has_peak & (~jnp.isfinite(second) | ((best - second) >= KP_PEAK_AMBIGUITY_GAP))
+    uv = jnp.array([best_idx % w, best_idx // w], dtype=jnp.float32)
+    missing = jnp.full((2,), KP_MISSING_VALUE, dtype=jnp.float32)
+    return jnp.where(unambiguous, uv, missing), jnp.where(has_peak, best, 0.0)
 
 
 def _extract_keypoints_one(hm: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -914,6 +940,44 @@ def _rot_err_deg(R_pred: np.ndarray, R_gt: np.ndarray) -> float:
 PNP_REPROJ_THRESH = 30.0  # px — reject degenerate PnP solutions before rasterizing
 
 
+def _solve_pnp_sqpnp_iter(pts_3d: np.ndarray, pts_2d_px: np.ndarray, K: np.ndarray) -> np.ndarray | None:
+    if pts_3d.shape[0] < 4:
+        return None
+    try:
+        ok, rvec, tvec = cv2.solvePnP(
+            pts_3d.astype(np.float64),
+            pts_2d_px.astype(np.float64),
+            K.astype(np.float64),
+            np.array([]),
+            flags=cv2.SOLVEPNP_SQPNP,
+        )
+        if ok:
+            ok, rvec, tvec = cv2.solvePnP(
+                pts_3d.astype(np.float64),
+                pts_2d_px.astype(np.float64),
+                K.astype(np.float64),
+                np.array([]),
+                flags=cv2.SOLVEPNP_ITERATIVE,
+                useExtrinsicGuess=True,
+                rvec=rvec,
+                tvec=tvec,
+            )
+    except cv2.error:
+        return None
+    if not ok:
+        return None
+    R, _ = cv2.Rodrigues(rvec)
+    w2c = np.eye(4, dtype=np.float64)
+    w2c[:3, :3] = R
+    w2c[:3, 3] = tvec.ravel()
+    return w2c
+
+
+def _reprojection_errors(w2c: np.ndarray, pts_3d: np.ndarray, uv_px: np.ndarray, K: np.ndarray) -> np.ndarray:
+    reproj = _project_points(w2c, pts_3d, K)
+    return np.linalg.norm(reproj - uv_px, axis=-1)
+
+
 def _pnp_reproj_err(
     w2c: np.ndarray, joints_rad: np.ndarray, uv_px: np.ndarray, valid: np.ndarray, K: np.ndarray
 ) -> float:
@@ -936,11 +1000,27 @@ def _mask_iou(pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:
 def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     joints_rad = np.deg2rad(np.asarray(q[:7], dtype=np.float64))
     pts_3d = fk_keypoints(joints_rad)
-    valid = np.isfinite(uv_px).all(axis=-1) & np.isfinite(conf) & (conf > KP_CONF_THRESHOLD)
-    try:
-        # Pre-filter by valid mask so synth_viz.solve_pnp sees only confident points.
-        w2c = solve_pnp_ransac(pts_3d[valid], uv_px[valid], K)
-    except Exception:
+    valid = np.isfinite(uv_px).all(axis=-1) & (uv_px[:, 0] > -999.0) & np.isfinite(conf) & (conf > KP_CONF_THRESHOLD)
+    w2c = _solve_pnp_sqpnp_iter(pts_3d[valid], uv_px[valid], K)
+    if w2c is None:
+        return joints_rad, valid, None
+
+    errs = _reprojection_errors(w2c, pts_3d[valid], uv_px[valid], K)
+    keep_local = errs <= PNP_REPROJ_THRESH
+    if not keep_local.all():
+        idx_valid = np.where(valid)[0]
+        valid_refined = np.zeros_like(valid)
+        valid_refined[idx_valid[keep_local]] = True
+        if valid_refined.sum() < 4:
+            return joints_rad, valid_refined, None
+        w2c_refined = _solve_pnp_sqpnp_iter(pts_3d[valid_refined], uv_px[valid_refined], K)
+        if w2c_refined is None:
+            return joints_rad, valid_refined, None
+        valid = valid_refined
+        w2c = w2c_refined
+
+    final_err = _pnp_reproj_err(w2c, joints_rad, uv_px, valid, K)
+    if final_err > PNP_REPROJ_THRESH:
         w2c = None
     return joints_rad, valid, w2c
 
@@ -1093,21 +1173,27 @@ def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pre
     uv_pred = np.asarray(pred_uv[idx])
     conf = np.asarray(pred_conf[idx])
     hm = np.asarray(pred_heatmaps[idx])
+    h, w = image.shape[:2]
+    gt_mask = vis & _kp_render_mask(uv_gt, h, w)
+    pred_mask = _kp_render_mask(uv_pred, h, w)
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-    axes[0].imshow(image)
-    axes[0].scatter(uv_gt[vis, 0], uv_gt[vis, 1], c="lime", s=20, label="gt")
-    axes[0].scatter(uv_pred[:, 0], uv_pred[:, 1], c="red", s=20, label="pred")
+    axes[0].imshow(_plot_image(image))
+    if gt_mask.any():
+        axes[0].scatter(uv_gt[gt_mask, 0], uv_gt[gt_mask, 1], c="lime", s=20, label="gt")
+    if pred_mask.any():
+        axes[0].scatter(uv_pred[pred_mask, 0], uv_pred[pred_mask, 1], c="red", s=20, label="pred")
     axes[0].set_title("image + keypoints")
-    axes[0].legend()
+    if gt_mask.any() or pred_mask.any():
+        axes[0].legend()
     axes[0].axis("off")
 
-    axes[1].imshow(hm.max(axis=0), cmap="magma")
+    axes[1].imshow(_plot_image(hm.max(axis=0)), cmap="magma")
     axes[1].set_title("max heatmap")
     axes[1].axis("off")
 
-    axes[2].imshow(image)
-    axes[2].imshow(hm.max(axis=0), cmap="magma", alpha=0.5, extent=(0, image.shape[1], image.shape[0], 0))
+    axes[2].imshow(_plot_image(image))
+    axes[2].imshow(_plot_image(hm.max(axis=0)), cmap="magma", alpha=0.5, extent=(0, image.shape[1], image.shape[0], 0))
     axes[2].set_title(f"overlay conf={conf.mean():.3f}")
     axes[2].axis("off")
 
@@ -1242,19 +1328,26 @@ def _render_gt_rast_overlay(batch: dict, idx: int = 0):
         reproj_title = "reproj failed"
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(panel)
+    axes[0].imshow(_plot_image(panel))
     axes[0].set_title(rast_title)
     axes[0].axis("off")
 
-    axes[1].imshow(reproj_image)
+    axes[1].imshow(_plot_image(reproj_image))
     if reproj_px is not None:
-        axes[1].scatter(kp2d_gt[kp_vis, 0], kp2d_gt[kp_vis, 1], c="lime", s=20, label="stored kp2d")
-        axes[1].scatter(reproj_px[kp_vis, 0], reproj_px[kp_vis, 1], c="red", s=20, marker="x", label="GT-PnP reproj")
-        axes[1].legend(fontsize=6)
+        gt_mask = kp_vis & _kp_render_mask(kp2d_gt, reproj_image.shape[0], reproj_image.shape[1])
+        reproj_mask = kp_vis & _kp_render_mask(reproj_px, reproj_image.shape[0], reproj_image.shape[1])
+        if gt_mask.any():
+            axes[1].scatter(kp2d_gt[gt_mask, 0], kp2d_gt[gt_mask, 1], c="lime", s=20, label="stored kp2d")
+        if reproj_mask.any():
+            axes[1].scatter(
+                reproj_px[reproj_mask, 0], reproj_px[reproj_mask, 1], c="red", s=20, marker="x", label="GT-PnP reproj"
+            )
+        if gt_mask.any() or reproj_mask.any():
+            axes[1].legend(fontsize=6)
     axes[1].set_title(reproj_title)
     axes[1].axis("off")
 
-    axes[2].imshow(gt_mask, cmap="gray")
+    axes[2].imshow(_plot_image(gt_mask), cmap="gray")
     axes[2].set_title("GT mask")
     axes[2].axis("off")
 
@@ -1367,9 +1460,13 @@ def _render_pose_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray
                 title = f"raster failed: {type(exc).__name__}"
 
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-    ax.imshow(panel)
-    ax.scatter(uv[valid, 0], uv[valid, 1], c="lime", s=12)
-    ax.scatter(uv[~valid, 0], uv[~valid, 1], c="red", s=12)
+    ax.imshow(_plot_image(panel))
+    valid_mask = valid & _kp_render_mask(uv, image.shape[0], image.shape[1])
+    invalid_mask = (~valid) & _kp_render_mask(uv, image.shape[0], image.shape[1])
+    if valid_mask.any():
+        ax.scatter(uv[valid_mask, 0], uv[valid_mask, 1], c="lime", s=12)
+    if invalid_mask.any():
+        ax.scatter(uv[invalid_mask, 0], uv[invalid_mask, 1], c="red", s=12)
     ax.set_title(title)
     ax.axis("off")
     fig.tight_layout()
