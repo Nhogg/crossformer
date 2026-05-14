@@ -18,7 +18,6 @@ from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, rasterize_robot
 from scripts.train import dream as train_dream
 
-
 DEFAULT_DATA_DIR = Path("/home/bela/datasets/dream-real-testdata/IRL-Test-Data")
 DEFAULT_CHECKPOINT = Path("/home/bela/weights/nvdream-v1")
 DEFAULT_JOINTS_DEG = (0.0, -45.0, 0.0, 35.0, 0.0, 65.0, 90.0)
@@ -212,7 +211,9 @@ def _print_summary(rows: list[PredRow]) -> None:
         f"{float(success.mean()) if len(rows) else 0.0:.3f}",
         f"{float(valid.mean()) if len(rows) else 0.0:.2f}",
         f"{float(conf.mean()) if len(rows) else 0.0:.3f}",
-        f"{float(np.nanmean(reproj)):.2f} / {float(np.nanmedian(reproj)):.2f}" if np.isfinite(reproj).any() else "nan / nan",
+        f"{float(np.nanmean(reproj)):.2f} / {float(np.nanmedian(reproj)):.2f}"
+        if np.isfinite(reproj).any()
+        else "nan / nan",
     )
     print(table)
 
@@ -238,7 +239,13 @@ def main() -> None:
     parser.add_argument("--n-stages", type=int, default=1)
     parser.add_argument("--skip-connections", action="store_true")
     parser.add_argument("--old-checkpoint-api", action="store_true")
-    parser.add_argument("--joints-deg", type=float, nargs=7, default=DEFAULT_JOINTS_DEG, metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"))
+    parser.add_argument(
+        "--joints-deg",
+        type=float,
+        nargs=7,
+        default=DEFAULT_JOINTS_DEG,
+        metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"),
+    )
     args = parser.parse_args()
 
     video = args.video or args.data_dir / "rgb.MP4"
@@ -254,10 +261,14 @@ def main() -> None:
     q_deg = np.asarray(args.joints_deg, dtype=np.float64)
 
     rows: list[PredRow] = []
-    for images, Ks, meta in _read_video_batches(video, raw_K, cfg.net_in_size, args.batch_size, args.stride, args.max_frames):
+    for images, Ks, meta in _read_video_batches(
+        video, raw_K, cfg.net_in_size, args.batch_size, args.stride, args.max_frames
+    ):
         uv, conf, pred_masks = _predict_batch(model, params, images, out_h, out_w)
         for i, (frame_i, t_s) in enumerate(meta):
-            valid, w2c, reproj_px, rast = _solve_and_raster(q_deg, uv[i], conf[i], Ks[i], images.shape[1], images.shape[2])
+            valid, w2c, reproj_px, rast = _solve_and_raster(
+                q_deg, uv[i], conf[i], Ks[i], images.shape[1], images.shape[2]
+            )
             rows.append(
                 PredRow(
                     frame=frame_i,
@@ -272,12 +283,20 @@ def main() -> None:
 
             pred_mask_i = pred_masks[i] if pred_masks is not None else None
             if pred_mask_i is not None:
-                cv2.imwrite(str(args.out_dir / "pred_masks" / f"frame_{frame_i:06d}.png"), (np.clip(pred_mask_i, 0, 1) * 255).astype(np.uint8))
+                cv2.imwrite(
+                    str(args.out_dir / "pred_masks" / f"frame_{frame_i:06d}.png"),
+                    (np.clip(pred_mask_i, 0, 1) * 255).astype(np.uint8),
+                )
             if rast is not None:
-                cv2.imwrite(str(args.out_dir / "rast_masks" / f"frame_{frame_i:06d}.png"), (np.clip(rast, 0, 1) * 255).astype(np.uint8))
+                cv2.imwrite(
+                    str(args.out_dir / "rast_masks" / f"frame_{frame_i:06d}.png"),
+                    (np.clip(rast, 0, 1) * 255).astype(np.uint8),
+                )
             if len(rows) == 1 or (len(rows) - 1) % args.save_every == 0:
                 panel = _panel(images[i], uv[i], conf[i], valid, pred_mask_i, rast)
-                cv2.imwrite(str(args.out_dir / "panels" / f"frame_{frame_i:06d}.jpg"), cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+                cv2.imwrite(
+                    str(args.out_dir / "panels" / f"frame_{frame_i:06d}.jpg"), cv2.cvtColor(panel, cv2.COLOR_RGB2BGR)
+                )
 
     _write_outputs(args.out_dir, rows)
     _print_summary(rows)
