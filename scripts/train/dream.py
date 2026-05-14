@@ -937,7 +937,9 @@ def _rot_err_deg(R_pred: np.ndarray, R_gt: np.ndarray) -> float:
     return float(np.rad2deg(np.arccos(np.clip(cos, -1.0, 1.0))))
 
 
+PNP_MIN_VALID_KP = 5
 PNP_REPROJ_THRESH = 30.0  # px — reject degenerate PnP solutions before rasterizing
+PNP_MASK_IOU_THRESH = 0.45  # reject accepted PnP poses whose raster mask disagrees with available GT mask
 
 
 def _solve_pnp_sqpnp_iter(pts_3d: np.ndarray, pts_2d_px: np.ndarray, K: np.ndarray) -> np.ndarray | None:
@@ -1001,6 +1003,8 @@ def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarr
     joints_rad = np.deg2rad(np.asarray(q[:7], dtype=np.float64))
     pts_3d = fk_keypoints(joints_rad)
     valid = np.isfinite(uv_px).all(axis=-1) & (uv_px[:, 0] > -999.0) & np.isfinite(conf) & (conf > KP_CONF_THRESHOLD)
+    if valid.sum() < PNP_MIN_VALID_KP:
+        return joints_rad, valid, None
     w2c = _solve_pnp_sqpnp_iter(pts_3d[valid], uv_px[valid], K)
     if w2c is None:
         return joints_rad, valid, None
@@ -1011,7 +1015,7 @@ def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarr
         idx_valid = np.where(valid)[0]
         valid_refined = np.zeros_like(valid)
         valid_refined[idx_valid[keep_local]] = True
-        if valid_refined.sum() < 4:
+        if valid_refined.sum() < PNP_MIN_VALID_KP:
             return joints_rad, valid_refined, None
         w2c_refined = _solve_pnp_sqpnp_iter(pts_3d[valid_refined], uv_px[valid_refined], K)
         if w2c_refined is None:
@@ -1033,7 +1037,7 @@ def _pose_metrics_one(q, uv_px, conf, K, kp2d_gt_px, kp_vis_gt, gt_mask: np.ndar
     """
     joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
     pts_3d = fk_keypoints(joints_rad)
-    out = {"valid_kp": float(valid.sum()), "success": 0.0}
+    out = {"valid_kp": float(valid.sum()), "success": 0.0, "valid_mask": valid.astype(np.float32)}
     if w2c_pred is None:
         return out
 
@@ -1064,7 +1068,11 @@ def _pose_metrics_one(q, uv_px, conf, K, kp2d_gt_px, kp_vis_gt, gt_mask: np.ndar
         try:
             gripper_rad = float(np.asarray(q)[7]) if np.asarray(q).shape[-1] > 7 else None
             rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h, gripper_rad=gripper_rad)
-            out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
+            mask_iou = _mask_iou(rast_mask, gt_mask)
+            out["mask_iou"] = mask_iou
+            if np.isfinite(mask_iou) and mask_iou < PNP_MASK_IOU_THRESH:
+                out["success"] = 0.0
+                out["mask_iou_reject"] = 1.0
         except Exception:
             pass
     return out
@@ -1077,7 +1085,7 @@ def _pose_metrics_irl_one(q, uv_px, conf, K, gt_mask: np.ndarray) -> dict:
     primary signal for whether the estimated extrinsics are correct.
     """
     joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
-    out = {"valid_kp": float(valid.sum()), "success": 0.0}
+    out = {"valid_kp": float(valid.sum()), "success": 0.0, "valid_mask": valid.astype(np.float32)}
     if w2c_pred is None:
         return out
 
@@ -1088,7 +1096,11 @@ def _pose_metrics_irl_one(q, uv_px, conf, K, gt_mask: np.ndarray) -> dict:
         try:
             gripper_rad = float(np.asarray(q)[7]) if np.asarray(q).shape[-1] > 7 else None
             rast_mask = rasterize_robot(joints_rad, w2c_pred, K, w, h, gripper_rad=gripper_rad)
-            out["mask_iou"] = _mask_iou(rast_mask, gt_mask)
+            mask_iou = _mask_iou(rast_mask, gt_mask)
+            out["mask_iou"] = mask_iou
+            if np.isfinite(mask_iou) and mask_iou < PNP_MASK_IOU_THRESH:
+                out["success"] = 0.0
+                out["mask_iou_reject"] = 1.0
         except Exception:
             pass
     return out
@@ -1120,9 +1132,22 @@ def pose_metrics(cfg: Config, batch: dict, out_dict: dict) -> dict:
         for i in range(q_np.shape[0])
     ]
     vals = {}
-    for key in ("valid_kp", "success", "reproj_px", "add_mm", "rot_err_deg", "trans_err_mm", "mask_iou"):
+    for key in (
+        "valid_kp",
+        "success",
+        "reproj_px",
+        "add_mm",
+        "rot_err_deg",
+        "trans_err_mm",
+        "mask_iou",
+        "mask_iou_reject",
+    ):
         xs = np.asarray([r[key] for r in rows if key in r], dtype=np.float32)
         vals[key] = float(xs.mean()) if len(xs) else float("nan")
+    valid_masks = np.asarray([r["valid_mask"] for r in rows if "valid_mask" in r], dtype=np.float32)
+    if len(valid_masks):
+        for i, rate in enumerate(valid_masks.mean(axis=0)):
+            vals[f"kp{i}_kept"] = float(rate)
     adds = np.asarray([r["add_mm"] for r in rows if "add_mm" in r], dtype=np.float32)
     if len(adds):
         curve = (adds[:, None] < ADD_THRESHOLDS_MM[None]).mean(axis=0)
@@ -1155,9 +1180,13 @@ def pose_metrics_irl(cfg: Config, batch: dict, out_dict: dict) -> dict:
         _pose_metrics_irl_one(q_np[i], uv_np[i], conf_np[i], K_np[i], gt_mask=mask_np[i]) for i in range(q_np.shape[0])
     ]
     vals = {}
-    for key in ("valid_kp", "success", "reproj_px", "mask_iou"):
+    for key in ("valid_kp", "success", "reproj_px", "mask_iou", "mask_iou_reject"):
         xs = np.asarray([r[key] for r in rows if key in r], dtype=np.float32)
         vals[key] = float(xs.mean()) if len(xs) else float("nan")
+    valid_masks = np.asarray([r["valid_mask"] for r in rows if "valid_mask" in r], dtype=np.float32)
+    if len(valid_masks):
+        for i, rate in enumerate(valid_masks.mean(axis=0)):
+            vals[f"kp{i}_kept"] = float(rate)
     return vals
 
 
@@ -1454,8 +1483,17 @@ def _render_pose_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray
             try:
                 gripper_rad = float(q[7]) if q.shape[-1] > 7 else None
                 mask = rasterize_robot(joints_rad, w2c, K, image.shape[1], image.shape[0], gripper_rad=gripper_rad)
-                panel = composite_robot(image, mask)
-                title = f"pose overlay reproj={reproj_err:.1f}px ({valid.sum()} kp)"
+                if "mask" in batch:
+                    gt_mask = np.asarray(batch["mask"][idx])
+                    mask_iou = _mask_iou(mask, gt_mask)
+                    if np.isfinite(mask_iou) and mask_iou < PNP_MASK_IOU_THRESH:
+                        title = f"PnP rejected IoU={mask_iou:.2f} reproj={reproj_err:.1f}px ({valid.sum()} kp)"
+                    else:
+                        panel = composite_robot(image, mask)
+                        title = f"pose overlay IoU={mask_iou:.2f} reproj={reproj_err:.1f}px ({valid.sum()} kp)"
+                else:
+                    panel = composite_robot(image, mask)
+                    title = f"pose overlay reproj={reproj_err:.1f}px ({valid.sum()} kp)"
             except Exception as exc:
                 title = f"raster failed: {type(exc).__name__}"
 
