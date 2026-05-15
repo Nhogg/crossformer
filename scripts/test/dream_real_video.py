@@ -179,6 +179,15 @@ def _mask_iou_float(a: np.ndarray | None, b: np.ndarray | None, thresh: float = 
     return float((aa & bb).sum() / union.sum()) if union.any() else float("nan")
 
 
+def _exp_decay_mask(mask: np.ndarray, *, thresh: float, decay_px: float) -> np.ndarray:
+    """Soft target: 1 inside mask, exponentially decays with distance outside."""
+    mask_bin = (np.asarray(mask) >= thresh).astype(np.uint8)
+    dist = cv2.distanceTransform(1 - mask_bin, cv2.DIST_L2, 5)
+    target = np.exp(-dist / max(decay_px, 1e-6)).astype(np.float32)
+    target[mask_bin > 0] = 1.0
+    return target
+
+
 def _axis_angle_R(vec: np.ndarray) -> np.ndarray:
     theta = float(np.linalg.norm(vec))
     if theta < 1e-12:
@@ -301,6 +310,8 @@ class MaskPoseRefiner:
         bce_weight: float,
         dice_weight: float,
         mask_thresh: float,
+        target_mode: str,
+        decay_px: float,
         max_rot_deg: float,
         max_trans_m: float,
     ):
@@ -321,6 +332,8 @@ class MaskPoseRefiner:
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
         self.mask_thresh = mask_thresh
+        self.target_mode = target_mode
+        self.decay_px = decay_px
         self.max_rot = np.deg2rad(max_rot_deg)
         self.max_trans = max_trans_m
         self.robot = _RobotMesh(Path("xarm7_standalone.urdf"), Path("assets"))
@@ -360,7 +373,12 @@ class MaskPoseRefiner:
         K_scaled[0] *= self.width / float(src_w)
         K_scaled[1] *= self.height / float(src_h)
         K = torch.as_tensor(K_scaled, dtype=torch.float32, device=self.device)
-        target = torch.as_tensor(np.clip(target_np, 0.0, 1.0), dtype=torch.float32, device=self.device)
+        target_arr = np.clip(target_np, 0.0, 1.0).astype(np.float32)
+        if self.target_mode == "exp-decay":
+            target_arr = _exp_decay_mask(target_arr, thresh=self.mask_thresh, decay_px=self.decay_px)
+        elif self.target_mode != "raw":
+            raise ValueError(f"unknown refine target mode: {self.target_mode}")
+        target = torch.as_tensor(target_arr, dtype=torch.float32, device=self.device)
         if tuple(target.shape) != (self.height, self.width):
             target = torch.nn.functional.interpolate(
                 target[None, None],
@@ -422,7 +440,6 @@ class MaskPoseRefiner:
         with torch.no_grad():
             mask0 = self._render(w2c0, K)
             loss0 = mask_loss(mask0)
-            best_score = soft_iou(mask0)
             best_delta = bounded_delta().detach().clone()
             best_loss = loss0.detach().clone()
 
@@ -439,11 +456,10 @@ class MaskPoseRefiner:
             with torch.no_grad():
                 post_delta = bounded_delta().detach().clone()
                 post_mask = self._render(compose(post_delta), K)
-                post_score = soft_iou(post_mask)
-                if post_score > best_score:
-                    best_score = post_score.detach().clone()
+                post_loss = mask_loss(post_mask)
+                if post_loss < best_loss:
                     best_delta = post_delta
-                    best_loss = mask_loss(post_mask).detach().clone()
+                    best_loss = post_loss.detach().clone()
 
         with torch.no_grad():
             w2c = compose(best_delta)
@@ -630,6 +646,8 @@ def main() -> None:
     parser.add_argument("--refine-bce-weight", type=float, default=0.05)
     parser.add_argument("--refine-dice-weight", type=float, default=0.25)
     parser.add_argument("--refine-mask-thresh", type=float, default=0.5)
+    parser.add_argument("--refine-target", choices=("raw", "exp-decay"), default="exp-decay")
+    parser.add_argument("--refine-decay-px", type=float, default=12.0)
     parser.add_argument("--refine-max-rot-deg", type=float, default=2.0)
     parser.add_argument("--refine-max-trans-m", type=float, default=0.02)
     parser.add_argument("--refine-min-iou-gain", type=float, default=0.0)
@@ -677,6 +695,8 @@ def main() -> None:
             bce_weight=args.refine_bce_weight,
             dice_weight=args.refine_dice_weight,
             mask_thresh=args.refine_mask_thresh,
+            target_mode=args.refine_target,
+            decay_px=args.refine_decay_px,
             max_rot_deg=args.refine_max_rot_deg,
             max_trans_m=args.refine_max_trans_m,
         )
