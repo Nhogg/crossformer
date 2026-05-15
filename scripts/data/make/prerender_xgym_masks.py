@@ -29,6 +29,11 @@ from pathlib import Path
 import sys
 import time
 
+# Spawned workers import this module before running _worker_init.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
 sys.path.insert(0, str(Path(__file__).parents[3]))
 
 import numpy as np
@@ -50,10 +55,10 @@ def _worker_init(extr_dir: str, cams: tuple[str, ...], raw_h: int, raw_w: int) -
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 
     # Imports happen inside worker so the parent process doesn't pay them.
-    from crossformer.utils.callbacks.synth_viz import _get_robot_mesh, fk_keypoints
     from crossformer.utils.rig import K_for_size, load_w2c
+    from crossformer.utils.robot_model import fk_keypoints, get_robot_mesh
 
-    robot = _get_robot_mesh()  # warms pyroki singleton
+    robot = get_robot_mesh()  # warms pyroki singleton
     K_raw = K_for_size(raw_h, raw_w)
     w2c_per_cam = {cam: load_w2c(cam, Path(extr_dir)) for cam in cams}
 
@@ -186,7 +191,7 @@ def main() -> None:
     root = args.root.expanduser()
     cams = tuple(args.cams)
     print(f"reading {args.name} v{args.src_version} from {root}", flush=True)
-    src_builder, src_meta = _open_src(args.name, args.src_version, args.branch, root)
+    src_builder, _ = _open_src(args.name, args.src_version, args.branch, root)
 
     if not {"image", "proprio"}.issubset(src_builder.writers):
         raise ValueError(f"expected image+proprio writers, got {list(src_builder.writers)}")
@@ -240,11 +245,13 @@ def main() -> None:
                     yield (i, joints, gripper_drive)
 
             t0 = time.perf_counter()
-            n_done = 0
-            for idx, render_out in tqdm(
-                pool.imap(_process_record, task_iter(), chunksize=4),
-                total=n,
-                desc="rendering",
+            for n_done, (idx, render_out) in enumerate(
+                tqdm(
+                    pool.imap(_process_record, task_iter(), chunksize=4),
+                    total=n,
+                    desc="rendering",
+                ),
+                start=1,
             ):
                 # re-read at consumption time so we have image+proprio for this idx
                 img_rec = unpack_record(img_src[idx])
@@ -257,7 +264,6 @@ def main() -> None:
                     "kp2d": render_out["kp2d"],  # dict[cam, (10,3)]
                 }
                 yield sample
-                n_done += 1
                 if n_done % 500 == 0:
                     elapsed = time.perf_counter() - t0
                     rate = n_done / elapsed
