@@ -141,7 +141,7 @@ class Config:
     # LOADER
     bs: int = 50
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
-    irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
+    irl_mix: Arec = default(Arec.from_name("xgym_lift_single"))
     irl_image_keys: tuple[str, ...] = ("side",)
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
