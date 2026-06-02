@@ -32,12 +32,13 @@ import tyro
 import crossformer.cn as cn
 from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
-from crossformer.data.grain.datasets import unpack_record
+from crossformer.data.grain.datasets import MultiArrayRecordSource, unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
+from crossformer.utils.imaug import *  # noqa: F403
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
@@ -46,6 +47,8 @@ KP_CONF_THRESHOLD = 0.03
 KP_SMOOTH_SIGMA = 1.0
 KP_SMOOTH_RADIUS = 2
 ADD_THRESHOLDS_MM = np.linspace(0.0, 100.0, 100, dtype=np.float32)
+SOURCE_SYNTH = np.uint8(0)
+SOURCE_REAL = np.uint8(1)
 
 
 @dataclass
@@ -121,8 +124,11 @@ class Config:
 
     # LOADER
     bs: int = 1
-    mix: Arec = default(Arec.from_name("xarm_dream_100k"))
-    irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
+    mix: Arec = default(Arec.from_name("xarm_dream_100k"), init=False)
+    real_mix: Arec = default(Arec.from_name("xgym_sweep_single"), init=False)
+    real_prob: float = 0.0
+    min_visible_kp: int = 4
+    irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"), init=False)
     irl_image_keys: tuple[str, ...] = ("low", "side")
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
@@ -204,18 +210,40 @@ def mix_with_bg(robot_ds, coco_ds, cfg: Config):
 
 
 def make_dataset(cfg: Config):
-    ds = (
+    synth = (
         grain.MapDataset.source(cfg.mix.source)
         .seed(42)
         .shuffle()
         .repeat()
         .map(unpack_record)
-        .to_iter_dataset(
-            grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024)
-        )  # iter before batch so that procs do batching and doesnt impede read threads
+        .map(lambda s: {**s, "_kind": "synth"})
     )
 
-    ds = ds.map(partial(prepare_sample_np, cfg))
+    if cfg.real_prob > 0.0:
+        real_src = cfg.real_mix.source
+        real = grain.MapDataset.source(real_src).seed(43).shuffle().repeat()
+        if not isinstance(real_src, MultiArrayRecordSource):
+            real = real.map(unpack_record)
+        real = real.map(lambda s: {**s, "_kind": "real"})
+        md = grain.MapDataset.mix([synth, real], weights=[1.0 - cfg.real_prob, cfg.real_prob])
+    else:
+        md = synth
+
+    ds = md.to_iter_dataset(
+        grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024)
+    )  # iter before batch so that procs do batching and doesnt impede read threads
+
+    def _prepare(s):
+        kind = s.pop("_kind")
+        out = prepare_sample_np(cfg, s) if kind == "synth" else prepare_irl_sample_np(cfg, s)
+        out["source"] = SOURCE_SYNTH if kind == "synth" else SOURCE_REAL
+        return out
+
+    ds = ds.map(_prepare)
+    ds = ds.filter(
+        lambda s: int(np.asarray(s["source"])) == int(SOURCE_REAL)
+        or int(np.asarray(s["keypoints_visible"]).sum()) >= cfg.min_visible_kp
+    )
     if cfg.coco_prob:
         coco = make_coco_dataset(cfg)
         ds = mix_with_bg(ds, coco, cfg)
@@ -242,6 +270,7 @@ def make_dataset(cfg: Config):
 def make_irl_dataset(cfg: Config):
     ds = grain.MapDataset.source(cfg.irl_mix.source).seed(cfg.seed).repeat()
     ds = ds.map(partial(prepare_irl_sample_np, cfg))
+    ds = ds.map(lambda s: {**s, "source": SOURCE_REAL})
     ds = ds.batch(cfg.bs, drop_remainder=True)
     ds = ds.map(make_shard_fn())
     ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=cfg.n_preshard)
