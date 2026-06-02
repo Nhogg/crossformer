@@ -18,33 +18,22 @@ import tyro
 from webpolicy.base_policy import BasePolicy
 from webpolicy.server import Server
 
+from crossformer.data.geometry import _denormalize_kp2d, _shrink_crop_image_np, _shrink_crop_intrinsics_np
 from crossformer.embody import KP2D_NAMES
-from crossformer.utils.callbacks.synth_viz import _get_robot_mesh
-from crossformer.utils.softras import silhouette
-from crossformer.utils.spatial.kp import (
+from crossformer.run.dream.metrics import (
     _mask_iou,
     _pnp_reproj_err,
-    _shrink_crop_image_np,
-    _shrink_crop_intrinsics_np,
     _solve_pnp_sqpnp_iter,
-    composite_robot,
     extract_keypoints,
-    fk_keypoints,
     PNP_MASK_IOU_THRESH,
-    rasterize_robot,
 )
+from crossformer.run.dream.modeling import _count_params, _image_to_float, make_model, net_out_size
+from crossformer.run.dream.train_steps import final_pred_heatmaps, prepare_pred_heatmaps, prepare_pred_mask
+from crossformer.utils.callbacks.synth_viz import _get_robot_mesh, composite_robot, fk_keypoints, rasterize_robot
+from crossformer.utils.softras import silhouette
+from crossformer.utils.spatial.calibration import solve_stacked_pnp
 from crossformer.utils.spatial.solve import levenberg_marquardt_se3_pnp
 from crossformer.utils.spec import spec
-from scripts.train.dream import (
-    _count_params,
-    _denormalize_kp2d,
-    _image_to_float,
-    final_pred_heatmaps,
-    make_model,
-    net_out_size,
-    prepare_pred_heatmaps,
-    prepare_pred_mask,
-)
 
 
 @dataclass
@@ -77,6 +66,7 @@ class ReturnConfig:
     raster: bool = False  # return resized image composited with accepted PnP robot raster
     use_reject: bool = True  # reject accepted poses by mask IoU when a mask is available
     mask_iou_thresh: float = PNP_MASK_IOU_THRESH
+    calibration: bool = False  # run stacked PnP across all frames for camera calibration
 
 
 @dataclass
@@ -635,7 +625,35 @@ class DreamPolicy(BasePolicy):
             )
         )
         out.pop("_mask", None)
+
+        if payload.get("calibrate") or self.cfg.ret.calibration:
+            out.update(self._stacked_calibration(payload_net, out))
+
         return out
+
+    def _stacked_calibration(self, payload_net: dict, out: dict) -> dict:
+        uv = np.asarray(out["keypoints"], dtype=np.float64)
+        conf = np.asarray(out["confidence"], dtype=np.float64)
+        q = _match_batch(
+            _as_batch(payload_net["q"], "q", 2).astype(np.float64),
+            uv.shape[0],
+            "q",
+        )
+        K = np.asarray(payload_net["K"][0], dtype=np.float64)
+
+        pts_3d = np.stack([fk_keypoints(np.deg2rad(q_i[:7])) for q_i in q], axis=0)
+        valid = np.isfinite(conf) & (conf > 0.01)
+        calib = solve_stacked_pnp(pts_3d, uv, K, valid)
+
+        return {
+            "calib_w2c": (
+                calib.w2c.astype(np.float32) if calib.w2c is not None else np.full((4, 4), np.nan, dtype=np.float32)
+            ),
+            "calib_success": np.array(calib.success, dtype=bool),
+            "calib_valid": calib.valid,
+            "calib_reproj_px": np.float32(calib.reproj_px),
+            "calib_n_points": np.int32(calib.n_points),
+        }
 
 
 def main(cfg: Config):
